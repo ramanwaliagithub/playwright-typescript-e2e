@@ -1,0 +1,288 @@
+# Setup Log
+
+Running, chronological record of every command used to set up this project from an empty
+directory, and why. This file is updated after every phase — it is the source of truth for
+"how do I get this environment working from scratch," separate from `README.md` (which
+documents what the framework does and how to run tests day-to-day).
+
+Environment this was built against: Windows 11, Node v24.18.0, Docker 29.6.2, Docker Compose
+v5.3.0, git 2.54.0.
+
+---
+
+## Phase 1 — Project Scaffolding (in progress)
+
+### 1. Package manager: install pnpm
+
+pnpm is required (not npm/yarn) — faster installs, disk-efficient content-addressable store,
+and strict dependency resolution that prevents phantom transitive imports.
+
+Corepack (bundled with Node) was tried first but failed because the Node install directory
+isn't user-writable in this environment:
+
+```
+corepack enable pnpm
+# Internal Error: EPERM: operation not permitted, open 'C:\Program Files\nodejs\pnpm.CMD'
+```
+
+Fell back to a global npm install instead:
+
+```bash
+npm install -g pnpm
+pnpm -v   # 11.20.0
+```
+
+### 2. Initialize the project
+
+```bash
+pnpm init
+```
+
+Then hand-edited `package.json` to set: project name (`playwright-typescript-e2e`), `private:
+true`, `type: "module"` (ESM throughout), `engines.node` pinned to the installed Node major
+(`>=24.0.0 <25.0.0` — Node 24 is Active LTS as of this build), `packageManager: "pnpm@11.20.0"`
+(pins the exact pnpm version via Corepack's packageManager field), and the npm scripts used
+day-to-day (`test`, `test:headed`, `test:ui`, `report`, `lint`, `lint:fix`, `format`,
+`format:check`, `typecheck`, `prepare`).
+
+### 3. Folder structure
+
+```bash
+mkdir -p tests pages fixtures utils api config data ci infra
+# .gitkeep placeholders so git tracks the still-empty folders (populated in later phases)
+for d in pages fixtures utils api config data ci infra; do touch "$d/.gitkeep"; done
+```
+
+| Folder      | Purpose                                                                         |
+| ----------- | ------------------------------------------------------------------------------- |
+| `tests/`    | Playwright test specs                                                           |
+| `pages/`    | Page Object Model classes (Phase 3)                                             |
+| `fixtures/` | Playwright `test.extend` fixtures wiring pages/API clients into tests (Phase 3) |
+| `utils/`    | Shared helpers                                                                  |
+| `api/`      | API client wrapper + typed request/response models (Phase 4)                    |
+| `config/`   | Environment config loader (Phase 5)                                             |
+| `data/`     | Test data factories (Phase 5)                                                   |
+| `ci/`       | GitHub Actions workflow support files (Phase 8)                                 |
+| `infra/`    | Terraform modules (Phase 9)                                                     |
+
+### 4. TypeScript config
+
+Wrote `tsconfig.json` — strict mode plus extra strictness flags (`noUncheckedIndexedAccess`,
+`exactOptionalPropertyTypes`, `noImplicitOverride`, `noPropertyAccessFromIndexSignature`,
+etc.), `NodeNext` module/resolution to match `"type": "module"`, and path aliases (`@pages/*`,
+`@fixtures/*`, `@utils/*`, `@api/*`, `@config/*`, `@data/*`) matching the folder structure above.
+
+### 5. Install dependencies
+
+```bash
+pnpm add -D typescript @playwright/test eslint @eslint/js typescript-eslint \
+  eslint-config-prettier eslint-plugin-playwright prettier husky lint-staged
+```
+
+`pnpm add` resolved `typescript@7.0.2` (the new native/Go-based compiler). That broke immediately:
+`typescript-eslint` doesn't support TS 7.0 yet, and TS 7 also removed bare `baseUrl` (needs
+relative `"paths"` entries). Pinned back to the last classic JS-based release instead:
+
+```bash
+pnpm add -D typescript@6.0.3
+pnpm exec tsc --version
+# Version 6.0.3
+```
+
+`tsconfig.json`'s `paths` entries were updated to `"./pages/*"` etc. (relative, no `baseUrl`)
+to match.
+
+### 6. ESLint flat config, Prettier, .gitignore
+
+- `eslint.config.js` — flat config (ESLint 10 default): `@eslint/js` recommended +
+  `typescript-eslint` recommended-type-checked + `eslint-plugin-playwright` (scoped to
+  `tests/**` and `fixtures/**`) + `eslint-config-prettier` last (turns off stylistic rules
+  that Prettier owns).
+- `.prettierrc.json` / `.prettierignore` — single quotes, semicolons, 100-char print width.
+- `.gitignore` — `node_modules/`, `.env*` (except `.env.example`), Playwright/Allure report
+  and result dirs, Terraform state/lock/cache, OS/editor cruft.
+
+### 7. Git + Husky pre-commit hook
+
+```bash
+git init
+git remote add origin https://github.com/ramanwaliagithub/playwright-typescript-e2e.git
+git branch -M main
+pnpm exec husky init
+```
+
+Replaced the default `.husky/pre-commit` (which husky init seeds with `npm test`) with:
+
+```
+pnpm exec lint-staged
+pnpm run typecheck
+```
+
+`lint-staged` config added to `package.json` — `*.ts` gets `eslint --fix`, and
+`*.{ts,json,md,yml,yaml}` gets `prettier --write`, on staged files only. `typecheck` still
+runs against the whole project (type errors aren't scoped to staged files).
+
+**Note:** nothing has been pushed to the `origin` remote — only `git init`/`remote add`/local
+commits happen during these phases. Pushing needs an explicit go-ahead.
+
+### 8. Clone Restful-Booker-Platform (app under test)
+
+Cloned as a **sibling** directory to this repo, not inside it — RBP is the application under
+test, not framework code:
+
+```bash
+cd /d/Work/projects/E2E
+git clone https://github.com/mwinteringham/restful-booker-platform.git
+```
+
+### 9. RBP local setup — Docker Compose alone doesn't work
+
+Attempted the plan's default (`docker compose build`) and it failed on all 6 Java services:
+
+```
+COPY target/restful-booker-platform-message-*-exec.jar ./message.jar
+ERROR: lstat /target: no such file or directory
+```
+
+Each Java service's Dockerfile expects a **pre-built jar from Maven**, not source — so Docker
+alone isn't self-contained; it still needs `mvn clean install` run on the host first, which
+needs JDK 26 + Maven (RBP's stated requirements). Neither was installed. Flagged this to the
+user rather than silently switching to the hosted instance; user chose to install JDK 26 +
+Maven locally and proceed with the original Docker plan.
+
+### 10. Install JDK 26 + Maven
+
+```bash
+winget install --id EclipseAdoptium.Temurin.26.JDK -e --accept-package-agreements --accept-source-agreements --silent
+```
+
+Installed to `C:\Program Files\Eclipse Adoptium\jdk-26.0.2.10-hotspot`.
+
+No Apache Maven package exists on winget, so it was downloaded and extracted manually to a
+user-writable directory (avoids the earlier `C:\Program Files\...` permission problem seen
+with Corepack):
+
+```bash
+mkdir -p /c/Users/hp/tools
+cd /c/Users/hp/tools
+curl -s -o maven.zip https://dlcdn.apache.org/maven/maven-3/3.9.16/binaries/apache-maven-3.9.16-bin.zip
+unzip -q maven.zip && rm maven.zip
+```
+
+Set `JAVA_HOME`, `MAVEN_HOME`, and `PATH` persistently at the Windows **User** environment
+level (PowerShell `[System.Environment]::SetEnvironmentVariable(..., "User")`) so new shells
+pick them up automatically:
+
+- `JAVA_HOME = C:\Program Files\Eclipse Adoptium\jdk-26.0.2.10-hotspot`
+- `MAVEN_HOME = C:\Users\hp\tools\apache-maven-3.9.16`
+- `Path += %JAVA_HOME%\bin;%MAVEN_HOME%\bin`
+
+**Note for a fresh terminal:** open a new shell after this for `java`/`mvn` to be on `PATH`
+automatically — the shell used during this setup had to export them inline per-command
+since already-open shells don't pick up new User env vars.
+
+Verified:
+
+```bash
+java -version   # openjdk 26.0.2 2026-07-21, Temurin-26.0.2+10
+mvn -version    # Apache Maven 3.9.16, Java version: 26.0.2
+```
+
+### 11. Build RBP with Maven
+
+```bash
+cd /d/Work/projects/E2E/restful-booker-platform
+mvn clean install
+```
+
+All 7 modules (auth, booking, room, report, branding, message, assets) built `SUCCESS` in ~3.5
+minutes on first run.
+
+### 12. Docker build hit a Windows-specific wall, then WSL itself broke
+
+`docker compose build` on the 6 Java services worked fine (they just `COPY` a jar). The
+`rbp-assets` (Next.js) service failed:
+
+```
+ERROR: rpc error: code = Unknown desc = read D:\...\assets\node_modules\@swc\helpers\...:
+Insufficient system resources exist to complete the requested service.
+```
+
+Cause: `assets/` had no `.dockerignore`, so Docker tried to send the entire local
+`node_modules`/`.next`/`target` trees (created by RBP's own Maven+npm build) as build
+context — hundreds of MB of small files — which the Windows Docker Desktop file-sharing layer
+couldn't handle. Added `assets/.dockerignore` (`node_modules`, `.next`, `target`, `.git`) since
+the Dockerfile already runs `npm ci` inside the container anyway; local `node_modules` should
+never be sent as build context. (This file lives in the RBP clone, not this repo, and wasn't
+pushed anywhere — RBP's own repo is untouched upstream.)
+
+Immediately after, Docker Desktop's WSL2 backend itself went unresponsive (`500 Internal
+Server Error` from the Docker API, then Docker Desktop reported "unable to communicate with
+the Windows Subsystem for Linux"). Fixed by force-restarting the WSL2 VM:
+
+```powershell
+wsl --shutdown
+```
+
+(User approved this explicitly first — it restarts _all_ WSL distros/Docker workloads on the
+machine, not just this project's.) Docker was responsive again afterward.
+
+### 13. Pivot: hosted RBP instance instead of local Docker deployment
+
+User's call: stop maintaining a local Docker deployment of RBP entirely and point the
+framework at the hosted public demo, **https://automationintesting.online**, instead — the
+Docker/WSL instability above was the trigger, and the standing preference going forward is:
+if the app under test has a usable hosted instance, prefer that over standing up local infra.
+
+Removed everything the local deployment had created:
+
+```bash
+docker rmi restful-booker-platform-rbp-auth restful-booker-platform-rbp-booking \
+  restful-booker-platform-rbp-branding restful-booker-platform-rbp-message \
+  restful-booker-platform-rbp-report restful-booker-platform-rbp-room
+```
+
+(`rbp-assets` was never successfully built, so nothing to remove there; no containers were
+ever started, so nothing to `docker compose down`.) Confirmed via `docker images` that no
+`restful-booker-platform-*` images remain.
+
+The RBP source clone at `D:\Work\projects\E2E\restful-booker-platform` (Maven/JDK/Maven
+install, jars, `node_modules`, etc.) was left on disk — only the Docker artifacts were asked
+to be removed. Flag if you'd like that cleaned up too.
+
+Updated `playwright.config.ts`'s default `BASE_URL` to
+`https://automationintesting.online`, and `.env.example` to match (dropped the local-vs-hosted
+comment since there's now just one target).
+
+### 14. tsconfig fixes found while typechecking real code
+
+Writing the first real `.ts` files (`playwright.config.ts`, `tests/smoke.spec.ts`) surfaced two
+tsconfig issues:
+
+- `process.env` didn't resolve (`Cannot find name 'process'`) even with `@types/node`
+  installed — added `"types": ["node"]` explicitly to `compilerOptions` rather than relying on
+  automatic `@types` inclusion.
+- The strict `noPropertyAccessFromIndexSignature` flag (intentionally enabled) requires
+  `process.env['BASE_URL']` bracket syntax instead of `process.env.BASE_URL`.
+
+### 15. Playwright install + smoke test
+
+```bash
+pnpm exec playwright install --with-deps chromium firefox webkit
+```
+
+Wrote `tests/smoke.spec.ts` — loads `/` and asserts the page title matches
+`/Restful-booker-platform/i` (confirmed via `curl` against the hosted instance first: title is
+literally `Restful-booker-platform demo`).
+
+```bash
+pnpm test
+# Running 3 tests using 3 workers
+# [1/3] [webkit] › tests\smoke.spec.ts:3:1 › RBP booking homepage loads
+# [2/3] [firefox] › tests\smoke.spec.ts:3:1 › RBP booking homepage loads
+# [3/3] [chromium] › tests\smoke.spec.ts:3:1 › RBP booking homepage loads
+#   3 passed (7.9s)
+```
+
+Phase 1 complete: `pnpm run lint`, `pnpm run typecheck`, and `pnpm test` all green against the
+hosted RBP instance across Chromium, Firefox, and WebKit.

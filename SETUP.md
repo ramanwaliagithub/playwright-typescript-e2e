@@ -286,3 +286,89 @@ pnpm test
 
 Phase 1 complete: `pnpm run lint`, `pnpm run typecheck`, and `pnpm test` all green against the
 hosted RBP instance across Chromium, Firefox, and WebKit.
+
+---
+
+## Phase 2 — Playwright Configuration
+
+Scope check before starting: the original plan's "multi-environment support" meant local-vs-
+hosted `baseURL`, but Phase 1 had just dropped local RBP entirely. Asked the user whether Phase
+2 should (a) just tune config for the hosted target only, or (b) build real environment-
+switching now even though only `hosted` is runnable today. User picked (b) — and confirmed local
+RBP is coming back into scope later, so the switching needed to be real, not a stub.
+
+### 1. `config/environments.ts`
+
+New file — `TestEnvironment = 'hosted' | 'local'`, each with its own `baseURL`, `retries`,
+`actionTimeout`, `navigationTimeout`. Resolved from `process.env['TEST_ENV']`, defaulting to
+`'hosted'` (matches Phase 1 behavior when `TEST_ENV` is unset). Removed `config/.gitkeep` since
+the folder now has real content.
+
+`hosted` gets more retries (2) and longer timeouts than `local` (0 retries) — reasoning: the
+public demo instance is shared with other automation learners, so it's more prone to transient
+slowness than a local Docker deployment would be.
+
+### 2. Wire `playwright.config.ts` to the environment config
+
+```ts
+import { environmentConfig } from './config/environments.js';
+```
+
+Note the `.js` extension on a `.ts` import — required by `"module": "NodeNext"` in
+`tsconfig.json` (ECMAScript imports under Node's ESM resolution need the extension the file
+will have at runtime, not its source extension). Forgetting it produced:
+
+```
+error TS2835: Relative import paths need explicit file extensions in ECMAScript imports
+```
+
+which then cascaded into 9 unrelated-looking `@typescript-eslint/no-unsafe-*` lint errors
+(typescript-eslint fell back to treating the unresolved import as `any`). Fixing the import
+extension fixed both `tsc` and `eslint` in one move.
+
+Also switched `trace` from `on-first-retry` to `retain-on-failure`: with `local`'s 0 retries,
+`on-first-retry` would never fire (there's no retry to attach to), so a `local` failure would
+capture no trace at all. `retain-on-failure` guarantees a trace on any failed test regardless of
+that environment's retry count — matches the plan's "trace/video/screenshot-on-failure only"
+requirement literally, for every environment.
+
+### 3. Cross-platform `TEST_ENV` switching
+
+```bash
+pnpm add -D cross-env
+```
+
+Added `test:hosted` (`cross-env TEST_ENV=hosted playwright test`) and `test:local` (same, with
+`local`) npm scripts. Plain `VAR=value command` syntax in `package.json` scripts doesn't work on
+native Windows `cmd.exe`, only bash/PowerShell 7+ — `cross-env` normalizes that so the same
+script works in any shell, including whatever CI ends up using (Phase 8).
+
+### 4. Proof
+
+```bash
+pnpm run typecheck   # clean
+pnpm run lint        # clean
+
+pnpm run test:hosted
+# Running 3 tests using 3 workers
+# [1/3] [webkit] › tests\smoke.spec.ts:3:1 › RBP booking homepage loads
+# [2/3] [chromium] › tests\smoke.spec.ts:3:1 › RBP booking homepage loads
+# [3/3] [firefox] › tests\smoke.spec.ts:3:1 › RBP booking homepage loads
+#   3 passed (5.5s)
+```
+
+`local` has no running RBP instance yet, so rather than run (and fail on) a real test against
+it, proved the _config_ resolves correctly with `--list` (evaluates `playwright.config.ts`,
+including loading `config/environments.ts`, without opening a browser or hitting the network):
+
+```bash
+TEST_ENV=local pnpm exec playwright test --list --reporter=list
+# Listing tests:
+#   [chromium] › smoke.spec.ts:3:1 › RBP booking homepage loads
+#   [firefox] › smoke.spec.ts:3:1 › RBP booking homepage loads
+#   [webkit] › smoke.spec.ts:3:1 › RBP booking homepage loads
+# Total: 3 tests in 1 file
+```
+
+Phase 2 complete: hosted environment fully green end-to-end; local environment's config path
+verified without requiring the not-yet-running local deployment.

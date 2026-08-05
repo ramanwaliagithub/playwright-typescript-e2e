@@ -8,13 +8,16 @@ log of every command used to get this environment working from scratch.
 
 ## Target application
 
-Tests run against RBP's **hosted public demo instance**: https://automationintesting.online
+Tests run against [Restful-Booker-Platform](https://github.com/mwinteringham/restful-booker-platform)
+in one of two environments, controlled by the `TEST_ENV` variable:
 
-We deliberately don't run RBP locally. A local Docker deployment was attempted first but hit
-real friction (a Maven-build prerequisite, a Windows Docker build-context bug, then Docker
-Desktop's WSL2 backend itself becoming unresponsive) — see `SETUP.md` steps 9-13 for the full
-story. Since a hosted instance is available, we default to that instead of maintaining local
-infrastructure.
+| `TEST_ENV`         | Base URL                           | Notes                                                                                                                                                                   |
+| ------------------ | ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `hosted` (default) | https://automationintesting.online | RBP's public demo instance — shared with other learners, so retries/timeouts are more generous.                                                                         |
+| `local`            | http://localhost                   | RBP running locally via Docker Compose. Not currently running (see `SETUP.md` steps 9-13 for what it takes to bring it back up) — the plumbing is ready for when it is. |
+
+Per-environment settings (base URL, retry count, action/navigation timeouts) live in
+[`config/environments.ts`](./config/environments.ts).
 
 ## Requirements
 
@@ -33,11 +36,16 @@ cp .env.example .env   # defaults already point at the hosted RBP instance
 ## Running tests
 
 ```bash
-pnpm test              # run all tests, all browsers, headless
-pnpm run test:headed   # same, with browser UI visible
+pnpm test              # run all tests against TEST_ENV (defaults to "hosted"), all browsers, headless
+pnpm run test:hosted   # force TEST_ENV=hosted
+pnpm run test:local    # force TEST_ENV=local (requires RBP running at http://localhost)
+pnpm run test:headed   # same as `pnpm test`, with browser UI visible
 pnpm run test:ui       # Playwright's interactive UI mode
 pnpm run report        # open the last HTML report
 ```
+
+`BASE_URL` can still be set directly to override the environment's default base URL for a
+one-off run (e.g. pointing at a staging deploy) without changing retry/timeout behavior.
 
 ## Quality checks
 
@@ -68,6 +76,7 @@ clutter. Here's what each one does and why it's here:
 | `lint-staged` (config lives inside `package.json`) | Used by the pre-commit hook to run ESLint/Prettier only on the files you actually staged for that commit, instead of relinting the entire repo every time.                                                                                                                                                       |
 | `.env.example`                                     | A checked-in template showing which environment variables the project expects (`BASE_URL`, admin creds), with placeholder/default values. You copy it to `.env` locally; `.env` itself is gitignored so real secrets never get committed.                                                                        |
 | `playwright.config.ts`                             | Playwright's own config — which browsers to run, the base URL under test, retries, and what failure artifacts (trace/video/screenshot) to keep.                                                                                                                                                                  |
+| `config/environments.ts`                           | Per-`TEST_ENV` settings (base URL, retries, action/navigation timeouts) that `playwright.config.ts` reads from. Will grow into the full typed config loader in Phase 5.                                                                                                                                          |
 
 ## Project structure
 
@@ -85,7 +94,7 @@ clutter. Here's what each one does and why it's here:
 
 ## Phase log
 
-### Phase 1 — Project Scaffolding ✅
+### Phase 1 — Project Scaffolding
 
 - TypeScript (strict, pinned to 6.0.3 — see `SETUP.md` step 5 for why not the new native 7.0
   compiler), ESLint flat config + Prettier, Husky pre-commit (`lint-staged` + `typecheck`),
@@ -102,5 +111,36 @@ clutter. Here's what each one does and why it's here:
     3 passed (7.9s)
   ```
 
-Next up (Phase 2, pending go-ahead): `playwright.config.ts` multi-environment support,
-per-environment retries/timeouts, and trace/video/screenshot-on-failure tuning.
+### Phase 2 — Playwright Configuration
+
+- Real multi-environment switching via `TEST_ENV` (`hosted` | `local`), backed by
+  `config/environments.ts` — each environment defines its own base URL, retry count, and
+  action/navigation timeouts. `local` isn't runnable today (no local RBP deployment — see
+  Phase 1 notes above) but the switch is fully wired so flipping it on later needs no framework
+  changes, just a running RBP at `http://localhost`.
+- `cross-env`-based `test:hosted` / `test:local` scripts so `TEST_ENV` setting works
+  identically on Windows cmd/PowerShell, bash, and CI.
+- Failure artifacts tightened to on-failure-only across the board: `trace: 'retain-on-failure'`,
+  `screenshot: 'only-on-failure'`, `video: 'retain-on-failure'` (previously `trace` was
+  `on-first-retry`, which would've captured nothing for the `local` environment's 0-retry
+  config on a failure).
+
+```
+$ pnpm run test:hosted
+Running 3 tests using 3 workers
+[1/3] [webkit] › tests\smoke.spec.ts:3:1 › RBP booking homepage loads
+[2/3] [chromium] › tests\smoke.spec.ts:3:1 › RBP booking homepage loads
+[3/3] [firefox] › tests\smoke.spec.ts:3:1 › RBP booking homepage loads
+  3 passed (5.5s)
+
+$ TEST_ENV=local pnpm exec playwright test --list
+Listing tests:
+  [chromium] › smoke.spec.ts:3:1 › RBP booking homepage loads
+  [firefox] › smoke.spec.ts:3:1 › RBP booking homepage loads
+  [webkit] › smoke.spec.ts:3:1 › RBP booking homepage loads
+Total: 3 tests in 1 file
+```
+
+Next up (Phase 3, pending go-ahead): Page Object Model architecture — `BasePage`, typed
+locators, fixture-based page injection, and real page objects against RBP's booking flow and
+admin panel.

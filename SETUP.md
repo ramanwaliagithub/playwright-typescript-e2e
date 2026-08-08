@@ -505,3 +505,13 @@ pnpm run test:hosted   # ran again immediately after, to rule out flakiness
 Phase 3 complete: 4 page objects + fixture-based injection, lint-enforced separation between
 tests and Playwright/page internals, and 3 passing spec files (9 tests across 3 browsers)
 against the real hosted RBP instance.
+
+### 10. Commit + push
+
+```bash
+git add .gitignore README.md SETUP.md eslint.config.js fixtures pages package.json \
+  playwright.config.ts pnpm-lock.yaml tests
+git commit -m "feat: add Page Object Model architecture with fixture-based injection"
+git push
+# f82f354..df5bd71  main -> main
+```

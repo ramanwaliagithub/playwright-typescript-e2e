@@ -77,6 +77,7 @@ clutter. Here's what each one does and why it's here:
 | `.env.example`                                     | A checked-in template showing which environment variables the project expects (`BASE_URL`, admin creds), with placeholder/default values. You copy it to `.env` locally; `.env` itself is gitignored so real secrets never get committed.                                                                        |
 | `playwright.config.ts`                             | Playwright's own config — which browsers to run, the base URL under test, retries, and what failure artifacts (trace/video/screenshot) to keep.                                                                                                                                                                  |
 | `config/environments.ts`                           | Per-`TEST_ENV` settings (base URL, retries, action/navigation timeouts) that `playwright.config.ts` reads from. Will grow into the full typed config loader in Phase 5.                                                                                                                                          |
+| `fixtures/pages.fixture.ts`                        | Wires Page Objects (and, going forward, API clients) into tests via Playwright's `test.extend`. Tests import `test`/`expect` from here instead of `@playwright/test` directly.                                                                                                                                   |
 
 ## Project structure
 
@@ -91,6 +92,22 @@ clutter. Here's what each one does and why it's here:
 | `data/`     | Test data factories (Phase 5)                                                   |
 | `ci/`       | GitHub Actions workflow support files (Phase 8)                                 |
 | `infra/`    | Terraform modules (Phase 9)                                                     |
+
+## Page Object Model architecture
+
+- `pages/BasePage.ts` — abstract base every page object extends; holds the shared `page`
+  handle and a `goto()` helper.
+- `pages/BookingHomePage.ts`, `pages/ReservationPage.ts`, `pages/AdminLoginPage.ts`,
+  `pages/AdminRoomsPage.ts` — one page object per real RBP screen, exposing intent-revealing
+  methods (`bookRoom('Single')`, `login(user, pass)`, `createRoom({...})`) instead of raw
+  locators.
+- `fixtures/pages.fixture.ts` — the _only_ place that constructs page objects and hands them
+  to tests via `test.extend`.
+- **Tests never touch `@playwright/test` or `page.*` directly.** `eslint.config.js` enforces
+  this for anything under `tests/`: importing from `@playwright/test` (instead of
+  `../fixtures/pages.fixture.js`) or calling any `page.<method>()` is a lint error. This keeps
+  every selector/locator confined to `pages/`, so a UI change means editing one page object,
+  not hunting through every spec that touches that screen.
 
 ## Phase log
 
@@ -141,6 +158,36 @@ Listing tests:
 Total: 3 tests in 1 file
 ```
 
-Next up (Phase 3, pending go-ahead): Page Object Model architecture — `BasePage`, typed
-locators, fixture-based page injection, and real page objects against RBP's booking flow and
-admin panel.
+### Phase 3 — Page Object Model Architecture
+
+- `BasePage` + 4 real page objects against RBP (`BookingHomePage`, `ReservationPage`,
+  `AdminLoginPage`, `AdminRoomsPage`), injected into tests via `fixtures/pages.fixture.ts`.
+- ESLint rules added (`no-restricted-imports` + `no-restricted-syntax`, scoped to `tests/**`)
+  that hard-fail a test file which imports `@playwright/test` directly or calls `page.*` —
+  proven by migrating Phase 1's `smoke.spec.ts` to the fixture pattern and watching lint catch
+  it before the fix.
+- `dotenv/config` added so `ADMIN_USERNAME`/`ADMIN_PASSWORD` load from `.env` instead of being
+  hardcoded anywhere (defaults still fall back to RBP's shipped `admin`/`password`).
+- Two real tests: a full guest booking flow (search → set dates → check availability → select
+  a room → fill guest details → confirm → assert `Booking Confirmed`), and an admin room
+  create+delete round trip.
+- **Flaky-test lesson learned:** the booking test initially hardcoded the site's default
+  pre-filled dates (today/tomorrow). Because the hosted instance is shared and stateful, our
+  own earlier test runs had already booked the "Single" room for those exact dates, so
+  `Check Availability` correctly filtered it out on later runs — the "Book now" link timed
+  out. Fixed by having `BookingHomePage.setStayDates()` pick a randomized date 30-330 days out
+  each run, avoiding collisions with prior bookings. Verified stable across two consecutive
+  full runs.
+
+```
+$ pnpm run test:hosted
+Running 9 tests using 8 workers
+[1/9] [webkit] › tests\admin-rooms.spec.ts:6:1 › admin can create and delete a room
+[2/9] [firefox] › tests\booking.spec.ts:3:1 › a guest can search, select, and book a room
+[3/9] [chromium] › tests\smoke.spec.ts:3:1 › RBP booking homepage loads
+...
+  9 passed (13.3s)
+```
+
+Next up (Phase 4, pending go-ahead): API testing layer — `APIRequestContext`-based client
+wrapper against RBP's REST API, schema validation, and API-based test data seeding.

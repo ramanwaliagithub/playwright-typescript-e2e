@@ -37,5 +37,31 @@ export default tseslint.config(
     files: ['tests/**/*.ts', 'fixtures/**/*.ts'],
     ...playwright.configs['flat/recommended'],
   },
+  {
+    // Enforce the Page Object boundary: tests must go through fixtures/pages.fixture.ts
+    // for both `test`/`expect` and page objects, never touch `page.*` or `@playwright/test`
+    // directly. Keeps all locators/selectors confined to pages/, not scattered in specs.
+    files: ['tests/**/*.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          paths: [
+            {
+              name: '@playwright/test',
+              message: 'Import test/expect from ../fixtures/pages.fixture.js instead.',
+            },
+          ],
+        },
+      ],
+      'no-restricted-syntax': [
+        'error',
+        {
+          selector: "CallExpression[callee.object.name='page']",
+          message: 'Tests must not call page.* directly — add a method to the relevant Page Object instead.',
+        },
+      ],
+    },
+  },
   prettier,
 );

@@ -372,3 +372,136 @@ TEST_ENV=local pnpm exec playwright test --list --reporter=list
 
 Phase 2 complete: hosted environment fully green end-to-end; local environment's config path
 verified without requiring the not-yet-running local deployment.
+
+---
+
+## Phase 3 — Page Object Model Architecture
+
+### 1. Inspect the real app before writing any selectors
+
+RBP's UI is a client-rendered Next.js app — `curl`-ing pages only returns the shell, no room
+listings or form fields. Instead, launched a real headless browser via a throwaway script
+(`scratch-inspect.mjs`, deleted before committing — never part of the repo) and dumped
+`page.locator('body').innerHTML()` at each step: homepage, a room's reservation page (before
+and after clicking "Reserve Now" — the guest-details form only exists in the DOM after that
+click), the admin login page, and the admin rooms page after logging in.
+
+This is where the real selectors used in the page objects below came from — e.g. room cards
+are `.room-card` with a heading matching the room type, guest fields are
+`input[name="firstname"|"lastname"|"email"|"phone"]`, rooms in the admin panel are
+`[data-testid="roomlisting"]` with per-field ids like `#roomName101`, and the delete icon is
+`.roomDelete`.
+
+### 2. Scope decision: hosted-only local was already dropped in Phase 1, but is `local` really staying real?
+
+The original plan's Phase 3 wording assumes admin/booking flows work the same locally and
+hosted. Asked the user whether Phase 2's environment-switching should be a real, functioning
+`hosted`/`local` split or just a hosted-only shortcut, since Phase 1 had dropped local RBP.
+User confirmed local is coming back into scope later — this phase's page objects and tests
+don't hardcode anything hosted-specific (paths are relative, e.g. `/admin`, `/reservation/1`),
+so they'll work unmodified against `local` once it's running again.
+
+### 3. Page objects
+
+```
+pages/BasePage.ts          — shared `page` handle + goto() helper, everything else extends this
+pages/BookingHomePage.ts   — room listing, date pickers, "Check Availability", "Book now"
+pages/ReservationPage.ts   — guest-details form + "Reserve Now" / booking confirmation
+pages/AdminLoginPage.ts    — admin login form
+pages/AdminRoomsPage.ts    — admin room listing + create/delete
+```
+
+Removed `pages/.gitkeep` and `fixtures/.gitkeep` now that both folders have real content.
+
+### 4. Fixture-based injection
+
+`fixtures/pages.fixture.ts` wraps Playwright's `test.extend` to construct each page object
+from the standard `page` fixture and hand it to tests by name (`bookingHomePage`,
+`reservationPage`, `adminLoginPage`, `adminRoomsPage`). Tests import `test`/`expect` from this
+file, never from `@playwright/test` directly.
+
+### 5. Enforcing the boundary with ESLint, not just convention
+
+Added to `eslint.config.js`, scoped to `files: ['tests/**/*.ts']`:
+
+- `no-restricted-imports` banning `@playwright/test` (message points at the fixture file
+  instead).
+- `no-restricted-syntax` banning any `page.<method>()` call expression (`CallExpression`
+  where `callee.object.name === 'page'`).
+
+Proved this actually catches violations, not just passes by construction: temporarily left
+Phase 1's `tests/smoke.spec.ts` untouched (still importing `@playwright/test` and calling
+`page.goto()` directly) and ran `pnpm run lint` — it failed with exactly the two expected
+errors. Migrated `smoke.spec.ts` to use `bookingHomePage.open()` + the fixture's `test`/`expect`
+(still reads `page` for `expect(page).toHaveTitle(...)` — that's an argument to `expect()`, not
+a `page.*` call, so it's allowed) and lint went green.
+
+### 6. Admin credentials: stop relying on the shell exporting env vars
+
+`.env.example` has existed since Phase 1, but nothing actually loaded `.env` into
+`process.env` — `TEST_ENV`/`BASE_URL` worked because they were being read directly, but the
+admin test needs `ADMIN_USERNAME`/`ADMIN_PASSWORD` from `.env` per the "never hardcode
+credentials" ground rule. Added:
+
+```bash
+pnpm add -D dotenv
+```
+
+and `import 'dotenv/config';` as the _first_ import in `playwright.config.ts` (import order
+matters here — it must run before `config/environments.ts` or anything else reads
+`process.env`). Playwright forwards the now-populated `process.env` to its worker processes,
+so test files see the same values. Full typed config loading is still Phase 5's job — this is
+the minimum needed to unblock Phase 3 without hardcoding secrets.
+
+### 7. Tests
+
+`tests/booking.spec.ts` — full guest flow: open homepage → set stay dates → check availability
+→ book "Single" → fill guest details → confirm → assert `Booking Confirmed`.
+
+`tests/admin-rooms.spec.ts` — log in as admin → create a room with a timestamp-derived unique
+room number → assert it's listed → delete it → assert it's gone. Self-cleaning, since this
+runs against the shared hosted instance.
+
+### 8. Flaky failure, root-caused, not papered over
+
+First full run: `booking.spec.ts` failed on firefox/webkit (chromium passed), with
+`TimeoutError` waiting for the "Single" room's "Book now" link after `Check Availability`.
+Re-running the whole suite made it fail on _all three_ browsers, including chromium, which had
+passed moments earlier — a strong signal the failure was caused by the test's own prior runs,
+not real flakiness.
+
+Root cause: the test hardcoded the site's default pre-filled dates (today/tomorrow — same
+dates used during the manual inspection step above, which had already created a real booking
+for "Single" on those exact dates). RBP's "Check Availability" filters the room list against
+_real_ existing bookings, so once "Single" was booked for that day, it correctly stopped
+appearing — the page object was working correctly; the test's fixed dates were the bug.
+
+Fix: `BookingHomePage.setStayDates(checkin, checkout)` fills the two date inputs directly
+(`.dateWrapper input`, format `MM/DD/YYYY` matching what the site itself renders) rather than
+relying on whatever's pre-filled. The test now picks a random day 30-330 days out on every run:
+
+```ts
+const daysOut = 30 + Math.floor(Math.random() * 300);
+```
+
+far enough out to not collide with anything booked near "today," and randomized so repeated
+runs (and the 3 parallel browser projects within one run) don't all fight over the exact same
+day either. Verified stable across two consecutive full 9-test runs after the fix.
+
+### 9. Proof
+
+```bash
+pnpm run typecheck   # clean
+pnpm run lint        # clean, including the new tests/** restriction rules
+
+pnpm run test:hosted
+# Running 9 tests using 8 workers
+#   9 passed (13.3s)
+
+pnpm run test:hosted   # ran again immediately after, to rule out flakiness
+#   9 passed (13.3s)
+```
+
+Phase 3 complete: 4 page objects + fixture-based injection, lint-enforced separation between
+tests and Playwright/page internals, and 3 passing spec files (9 tests across 3 browsers)
+against the real hosted RBP instance.

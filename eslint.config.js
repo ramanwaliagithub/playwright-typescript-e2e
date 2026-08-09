@@ -38,9 +38,10 @@ export default tseslint.config(
     ...playwright.configs['flat/recommended'],
   },
   {
-    // Enforce the Page Object boundary: tests must go through fixtures/pages.fixture.ts
-    // for both `test`/`expect` and page objects, never touch `page.*` or `@playwright/test`
-    // directly. Keeps all locators/selectors confined to pages/, not scattered in specs.
+    // Enforce the Page Object / API client boundary: tests must go through
+    // fixtures/pages.fixture.ts for `test`/`expect`, page objects, and the API client, never
+    // touch `page.*`, `request.*`, or `@playwright/test` directly. Keeps every selector and
+    // every raw HTTP call confined to pages/ and api/, not scattered across specs.
     files: ['tests/**/*.ts'],
     rules: {
       'no-restricted-imports': [
@@ -57,8 +58,9 @@ export default tseslint.config(
       'no-restricted-syntax': [
         'error',
         {
-          selector: "CallExpression[callee.object.name='page']",
-          message: 'Tests must not call page.* directly — add a method to the relevant Page Object instead.',
+          selector: 'CallExpression[callee.object.name=/^(page|request)$/]',
+          message:
+            'Tests must not call page.*/request.* directly — add a method to the relevant Page Object or RbpApiClient instead.',
         },
       ],
     },

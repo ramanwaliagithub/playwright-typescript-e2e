@@ -3,12 +3,14 @@ import { BookingHomePage } from '../pages/BookingHomePage.js';
 import { ReservationPage } from '../pages/ReservationPage.js';
 import { AdminLoginPage } from '../pages/AdminLoginPage.js';
 import { AdminRoomsPage } from '../pages/AdminRoomsPage.js';
+import { RbpApiClient } from '../api/RbpApiClient.js';
 
 interface PageFixtures {
   bookingHomePage: BookingHomePage;
   reservationPage: ReservationPage;
   adminLoginPage: AdminLoginPage;
   adminRoomsPage: AdminRoomsPage;
+  apiClient: RbpApiClient;
 }
 
 export const test = base.extend<PageFixtures>({
@@ -23,6 +25,9 @@ export const test = base.extend<PageFixtures>({
   },
   adminRoomsPage: async ({ page }, use) => {
     await use(new AdminRoomsPage(page));
+  },
+  apiClient: async ({ request }, use) => {
+    await use(new RbpApiClient(request));
   },
 });
 

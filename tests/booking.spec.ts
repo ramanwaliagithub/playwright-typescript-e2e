@@ -1,14 +1,11 @@
 import { test, expect } from '../fixtures/pages.fixture.js';
+import { randomStayDates } from '../utils/randomStayDates.js';
 
 test('a guest can search, select, and book a room', async ({
   bookingHomePage,
   reservationPage,
 }) => {
-  // Pick a random date far enough out that it's very unlikely another test run (or another
-  // learner, on this shared hosted instance) has already booked every room for that day.
-  const daysOut = 30 + Math.floor(Math.random() * 300);
-  const checkin = new Date(Date.now() + daysOut * 24 * 60 * 60 * 1000);
-  const checkout = new Date(checkin.getTime() + 24 * 60 * 60 * 1000);
+  const { checkin, checkout } = randomStayDates();
 
   await bookingHomePage.open();
   await bookingHomePage.setStayDates(checkin, checkout);

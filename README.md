@@ -77,21 +77,23 @@ clutter. Here's what each one does and why it's here:
 | `.env.example`                                     | A checked-in template showing which environment variables the project expects (`BASE_URL`, admin creds), with placeholder/default values. You copy it to `.env` locally; `.env` itself is gitignored so real secrets never get committed.                                                                        |
 | `playwright.config.ts`                             | Playwright's own config — which browsers to run, the base URL under test, retries, and what failure artifacts (trace/video/screenshot) to keep.                                                                                                                                                                  |
 | `config/environments.ts`                           | Per-`TEST_ENV` settings (base URL, retries, action/navigation timeouts) that `playwright.config.ts` reads from. Will grow into the full typed config loader in Phase 5.                                                                                                                                          |
-| `fixtures/pages.fixture.ts`                        | Wires Page Objects (and, going forward, API clients) into tests via Playwright's `test.extend`. Tests import `test`/`expect` from here instead of `@playwright/test` directly.                                                                                                                                   |
+| `fixtures/pages.fixture.ts`                        | Wires Page Objects and the API client into tests via Playwright's `test.extend`. Tests import `test`/`expect` from here instead of `@playwright/test` directly.                                                                                                                                                  |
+| `api/schemas.ts`                                   | Zod schemas for every RBP API response shape, plus their inferred TypeScript types (`z.infer`) — one source of truth instead of hand-maintained interfaces that can drift from reality.                                                                                                                          |
+| `api/RbpApiClient.ts`                              | Typed wrapper over RBP's REST API (`APIRequestContext`-based). Every response is parsed through its zod schema, so an API shape change fails loudly here instead of silently breaking a test.                                                                                                                    |
 
 ## Project structure
 
-| Folder      | Purpose                                                                         |
-| ----------- | ------------------------------------------------------------------------------- |
-| `tests/`    | Playwright test specs                                                           |
-| `pages/`    | Page Object Model classes (Phase 3)                                             |
-| `fixtures/` | Playwright `test.extend` fixtures wiring pages/API clients into tests (Phase 3) |
-| `utils/`    | Shared helpers                                                                  |
-| `api/`      | API client wrapper + typed request/response models (Phase 4)                    |
-| `config/`   | Environment config loader (Phase 5)                                             |
-| `data/`     | Test data factories (Phase 5)                                                   |
-| `ci/`       | GitHub Actions workflow support files (Phase 8)                                 |
-| `infra/`    | Terraform modules (Phase 9)                                                     |
+| Folder      | Purpose                                                                          |
+| ----------- | -------------------------------------------------------------------------------- |
+| `tests/`    | Playwright test specs (`tests/api/` holds pure API contract tests)               |
+| `pages/`    | Page Object Model classes (Phase 3)                                              |
+| `fixtures/` | Playwright `test.extend` fixtures wiring pages/API client into tests (Phase 3-4) |
+| `utils/`    | Shared helpers (e.g. collision-safe random test data)                            |
+| `api/`      | API client wrapper + zod schemas / typed models (Phase 4)                        |
+| `config/`   | Environment config + credentials loader (full typed loader lands in Phase 5)     |
+| `data/`     | Test data factories (Phase 5)                                                    |
+| `ci/`       | GitHub Actions workflow support files (Phase 8)                                  |
+| `infra/`    | Terraform modules (Phase 9)                                                      |
 
 ## Page Object Model architecture
 
@@ -108,6 +110,25 @@ clutter. Here's what each one does and why it's here:
   `../fixtures/pages.fixture.js`) or calling any `page.<method>()` is a lint error. This keeps
   every selector/locator confined to `pages/`, so a UI change means editing one page object,
   not hunting through every spec that touches that screen.
+
+## API Testing Layer
+
+- `api/schemas.ts` — zod schemas for RBP's rooms/bookings/messages/auth responses, with
+  TypeScript types inferred from them (`z.infer`) rather than hand-written separately.
+- `api/RbpApiClient.ts` — one method per API operation (`listRooms`, `createBooking`,
+  `getBooking`, `login`, `sendMessage`, ...). Every response is `.parse()`d through its schema,
+  so an API contract change surfaces as a clear zod error at the call site, not a confusing
+  downstream failure. RBP has no token-refresh flow — `login()` stores the opaque token and
+  attaches it as a manual `Cookie` header on subsequent authenticated calls (mirroring what the
+  app's own frontend does via `document.cookie`, which a non-browser HTTP client can't do
+  automatically).
+- Injected into tests as the `apiClient` fixture (same `fixtures/pages.fixture.ts` as the page
+  objects) — bound by the same lint rule as `page.*`: tests can't call `request.*` directly
+  either, only through `apiClient`.
+- Used two ways: standalone **contract tests** under `tests/api/` (rooms, bookings, messages —
+  each validates the real response shape and round-trips create → read → delete), and as a
+  **seeding utility** for a UI test (`tests/room-seeded-via-api.spec.ts` creates a room via the
+  API, then verifies it shows up in the admin rooms panel UI).
 
 ## Phase log
 
@@ -189,5 +210,42 @@ Running 9 tests using 8 workers
   9 passed (13.3s)
 ```
 
-Next up (Phase 4, pending go-ahead): API testing layer — `APIRequestContext`-based client
-wrapper against RBP's REST API, schema validation, and API-based test data seeding.
+### Phase 4 — API Testing Layer
+
+- `api/schemas.ts` (zod) + `api/RbpApiClient.ts` covering rooms, bookings, messages, and auth —
+  full CRUD where RBP supports it (rooms: create/list/delete; bookings: create/get/list/delete;
+  messages: send/list/get/delete), reverse-engineered from the hosted instance's real network
+  traffic since there's no published API spec.
+- `apiClient` fixture added alongside the Phase 3 page objects; the tests/** lint boundary now
+  also blocks `request.*` calls, not just `page.*`.
+- 3 API contract tests (`tests/api/rooms.spec.ts`, `bookings.spec.ts`, `messages.spec.ts`) plus
+  1 hybrid seeding test (`tests/room-seeded-via-api.spec.ts`) — creates a room via the API,
+  confirms it in the admin rooms panel UI, cleans up via the API.
+- **Real bugs found by writing these tests, not hypothetical ones:**
+  - `RoomSchema` required `description`/`image` on every room, but those only exist on the 3
+    originally-seeded rooms — anything created via the admin panel or API never gets them.
+    Fixed by making both optional, which is what the API actually does.
+  - The initial seeding test asserted a room appears on the **public homepage** after creation
+    — but that page is statically pre-rendered at build time and never reflects new data.
+    Redesigned to check the **admin rooms panel** instead (which is what the original plan
+    described, and is actually live).
+  - `Date.now()`-based "unique" test IDs aren't unique across the 3 browser projects running in
+    parallel — they can start within the same millisecond and compute identical values, causing
+    one worker's cleanup to delete another worker's data. Replaced with `utils/uniqueSuffix.ts`
+    (`Math.random()`-based, safe across processes) and reused it for the earlier random-date
+    helper too (`utils/randomStayDates.ts`).
+  - Data-creating tests now clean up in a `finally` block, not just after their assertions —
+    a failed assertion no longer leaves orphaned rooms/bookings/messages behind. (~18 orphaned
+    rooms from earlier debugging sessions were manually cleared from the shared hosted instance
+    as part of this fix, with the user's explicit go-ahead since it's shared infrastructure.)
+
+```
+$ pnpm run test:hosted
+Running 21 tests using 8 workers
+...
+  21 passed (29.9s)
+```
+
+Next up (Phase 5, pending go-ahead): test data & config management — environment config
+layering, a typed config loader, secrets handling, and test data factories built on this
+phase's API client.

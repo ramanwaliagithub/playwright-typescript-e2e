@@ -515,3 +515,158 @@ git commit -m "feat: add Page Object Model architecture with fixture-based injec
 git push
 # f82f354..df5bd71  main -> main
 ```
+
+---
+
+## Phase 4 — API Testing Layer
+
+### 1. Reverse-engineer the real API from network traffic
+
+RBP has no published API spec. Probed the hosted instance directly with plain `fetch` in a
+throwaway script (`scratch-api.mjs`, deleted before committing) to learn the real request/
+response shapes for every endpoint needed: `GET /api/room`, `POST /api/auth/login`,
+`GET/POST/DELETE /api/booking(/:id)`, `GET/POST/DELETE /api/message(/:id)`,
+`POST/DELETE /api/room(/:id)`.
+
+Key findings that shaped the client:
+
+- **Auth is a bare opaque token, not a cookie the server sets for you.**
+  `POST /api/auth/login` returns `{ token }` with no `Set-Cookie` header. Tried `Authorization:
+Bearer`, a custom `X-Auth-Token` header, and a manually-constructed `Cookie: token=<value>`
+  header against a protected endpoint (`GET /api/booking?roomid=1`) — only the `Cookie` header
+  worked (401 → 200). The real frontend must set this via `document.cookie` client-side after
+  login (a browser blocks scripts from setting the `Cookie` _request_ header directly, but
+  `document.cookie` is a different, allowed API) — a plain HTTP client isn't bound by that
+  browser restriction, so setting the header explicitly is the correct equivalent.
+- **Different endpoints need different auth.** `GET /api/room`, `POST /api/booking` (guests
+  book without logging in — matches the UI flow from Phase 3), `GET/POST /api/message`, and
+  `GET /api/message/:id` are all public. `GET/DELETE /api/booking/:id`, `GET /api/booking?
+roomid=`, `POST/DELETE /api/room(/:id)`, and `DELETE /api/message/:id` require the auth
+  cookie.
+- **Booking creation needs a nested `bookingdates` object**, not flat `checkin`/`checkout`
+  fields — a flat payload silently produced `{"errors":["Failed to create booking"]}` (500);
+  matching the shape `GET /api/booking` itself returns fixed it (201).
+- `POST /api/room` returns just `{success:true}`, not the created room — its `roomid` has to be
+  found afterward via `GET /api/room`.
+
+### 2. `api/schemas.ts` — zod schemas, types inferred from them
+
+One schema per response shape (`RoomSchema`, `BookingSchema`, `MessageSchema`,
+`MessageSummarySchema`, `LoginResponseSchema`, list wrappers for each), with
+`z.infer<typeof X>` for the TypeScript types instead of hand-duplicating interfaces that could
+drift from the schema.
+
+### 3. `api/RbpApiClient.ts` — the typed client
+
+One method per operation, each `.parse()`-ing the response through its schema:
+`login`, `listRooms`, `createRoom`, `deleteRoom`, `createBooking`, `getBooking`,
+`listBookingsForRoom`, `deleteBooking`, `listMessages`, `getMessage`, `sendMessage`,
+`deleteMessage`. `login()` stores the token internally and attaches
+`Cookie: token=<value>` on every subsequent authenticated call via a private `authHeaders()`
+helper that throws a clear error if called before `login()`.
+
+Removed `api/.gitkeep` now that the folder has real content.
+
+### 4. Extracted `config/credentials.ts`
+
+Multiple test files now need `ADMIN_USERNAME`/`ADMIN_PASSWORD`, previously inlined only in
+`tests/admin-rooms.spec.ts`. Pulled into one `adminCredentials` export and updated
+`admin-rooms.spec.ts` to use it too, so there's one place reading those env vars.
+
+### 5. Wire `apiClient` into the fixture, extend the lint boundary
+
+Added an `apiClient` fixture to `fixtures/pages.fixture.ts` (constructs `RbpApiClient` from
+Playwright's built-in `request` fixture). Extended the Phase 3 `no-restricted-syntax` ESLint
+rule from banning only `page.*` calls in `tests/**` to also ban `request.*` — the same
+separation principle applies to the API layer: tests get HTTP access only through
+`RbpApiClient`, never the raw `APIRequestContext`.
+
+### 6. Tests: 3 contract tests + 1 hybrid seeding test
+
+- `tests/api/rooms.spec.ts` — `GET /api/room` returns the 3 seed rooms with a schema-valid
+  shape.
+- `tests/api/bookings.spec.ts` — create → get-by-id → list-by-room → delete, asserting the
+  response at each step.
+- `tests/api/messages.spec.ts` — send → find-in-list → get-by-id → delete, asserting content
+  matches what was sent.
+- `tests/room-seeded-via-api.spec.ts` — the "(b) test-data seeding" half of this phase's brief:
+  create a room via the API, confirm it independently through a UI page object, delete it via
+  the API.
+
+### 7. Three real bugs, found by actually running these against the shared instance
+
+**Bug 1 — schema too strict.** First full run failed `tests/api/rooms.spec.ts` with 20+ zod
+errors like `path: ["rooms", 17, "description"], expected string, received undefined` — and
+the room _index_ being 17 was itself a clue that something had gone wrong before this bug even
+mattered (see Bug 3). Root cause: `RoomSchema` required `description` and `image` as strings,
+but those fields only exist on the 3 originally-curated rooms — anything created through the
+admin panel's create-room form (no description/image inputs) or this phase's `createRoom` API
+method never gets them. Fixed by making both `.optional()` in the schema — this is what the
+real API actually does, not a workaround.
+
+**Bug 2 — wrong UI target for the seeding test.** The first version of
+`room-seeded-via-api.spec.ts` created a room via the API, then asserted it appeared as a
+`.room-card` on the **public homepage** (`/`). That failed 100% of the time, on all 3 browsers,
+even with a guaranteed-unique price to search for. Root cause: `/` is a statically pre-rendered
+Next.js route (confirmed from the build output captured back in Phase 1's setup log —
+`├ ○ /` — `○ (Static)`), so it reflects whatever existed at build time and never picks up
+rooms created afterward. The **admin rooms panel**, by contrast, is what Phase 3's
+`admin-rooms.spec.ts` already proved is live/dynamic. Rewrote the test to log into the admin
+panel and check `adminRoomsPage.roomRow(roomName)` instead — which is also a closer match to
+what the original phase plan actually specified ("create a booking via API before testing the
+**admin panel** shows it").
+
+**Bug 3 — `Date.now()` isn't a safe "unique" ID under parallelism.** Several tests generated
+"unique" room numbers/prices/message subjects via
+`` `9${Date.now() % 100_000}` ``. That looks unique but isn't: the 3 browser projects
+(chromium/firefox/webkit) run the _same_ test in parallel and start within the same
+millisecond window, so they can compute the identical "unique" value. When two workers' cleanup
+code then does `rooms.find(r => r.roomName === roomName)`, it can match — and delete — a
+_different_ worker's still-in-use room, which is exactly what surfaced as the Bug 2 fix's
+`£712` room going missing mid-test on retries. `Math.random()` doesn't have this problem
+(separate process, separate random state per worker). Extracted
+`utils/uniqueSuffix.ts` (`Math.random()`-based) and reused it everywhere a "unique per test"
+value was needed, replacing `Date.now()` throughout — including refactoring Phase 3's already-
+working `randomStayDates()` logic into `utils/randomStayDates.ts` for the same reason
+(consistency, and `tests/api/bookings.spec.ts` needed the same random-date approach that
+`tests/booking.spec.ts` already used, since it _also_ hit the "hardcoded date collides with a
+previous run's booking" bug from Phase 3, just via the API instead of the UI).
+
+**Also:** every data-creating test now wraps its assertions in `try { ... } finally { cleanup
+}` instead of cleanup-after-assertions — a failed assertion no longer skips deletion and leaves
+orphaned data behind. This is _why_ Bug 1 was even visible: earlier debugging-session test
+runs (before this fix existed) had left ~18 orphaned rooms on the shared hosted instance from
+failed assertions that never reached their cleanup step.
+
+### 8. Cleaned up accumulated test debris
+
+Before the fixes above, the shared hosted instance had accumulated 21 rooms (only 3 are the
+real seed rooms). Listed them via a throwaway script, confirmed with the user before deleting
+anything (shared/public infrastructure, not just this project's), then deleted every room
+except `101`/`102`/`103`:
+
+```bash
+node scratch-cleanup.mjs
+# deleted room 4 (912306): 202
+# ... (18 total)
+# rooms after cleanup: [ '1:101', '2:102', '3:103' ]
+```
+
+### 9. Proof
+
+```bash
+pnpm run typecheck   # clean
+pnpm run lint        # clean, including the extended tests/** restriction rules
+
+pnpm run test:hosted
+# Running 21 tests using 8 workers
+#   21 passed (29.9s)
+
+pnpm run test:hosted   # ran again immediately after
+#   21 passed (29.9s)
+```
+
+Phase 4 complete: typed, schema-validated API client covering rooms/bookings/messages/auth,
+used both for standalone contract tests and as a seeding utility for a UI test — plus three
+real, non-hypothetical bugs found and fixed by actually running everything against the live
+shared instance instead of trusting the implementation on paper.

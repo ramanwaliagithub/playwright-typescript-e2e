@@ -1,5 +1,6 @@
 import { test, expect } from '../fixtures/pages.fixture.js';
 import { randomStayDates } from '../utils/randomStayDates.js';
+import { buildGuest } from '../data/guestFactory.js';
 
 test('a guest can search, select, and book a room', async ({
   bookingHomePage,
@@ -13,12 +14,7 @@ test('a guest can search, select, and book a room', async ({
   await bookingHomePage.bookRoom('Single');
 
   await reservationPage.startReservation();
-  await reservationPage.fillGuestDetails({
-    firstName: 'Jane',
-    lastName: 'Doe',
-    email: 'jane.doe@example.com',
-    phone: '01234567890',
-  });
+  await reservationPage.fillGuestDetails(buildGuest());
   await reservationPage.confirmReservation();
 
   await expect(reservationPage.confirmationHeading).toBeVisible();

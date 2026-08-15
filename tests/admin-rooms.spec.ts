@@ -1,25 +1,25 @@
 import { test, expect } from '../fixtures/pages.fixture.js';
 import { adminCredentials } from '../config/credentials.js';
-import { uniqueSuffix } from '../utils/uniqueSuffix.js';
+import { buildNewRoom } from '../data/roomFactory.js';
 
 test('admin can create and delete a room', async ({ adminLoginPage, adminRoomsPage }) => {
   await adminLoginPage.open();
   await adminLoginPage.login(adminCredentials.username, adminCredentials.password);
 
-  const roomNumber = uniqueSuffix();
+  const room = buildNewRoom();
 
   await adminRoomsPage.createRoom({
-    roomNumber,
-    type: 'Single',
-    accessible: true,
-    price: '99',
-    features: ['WiFi'],
+    roomNumber: room.roomName,
+    type: room.type,
+    accessible: room.accessible,
+    price: String(room.roomPrice),
+    features: room.features,
   });
 
   try {
-    await expect(adminRoomsPage.roomRow(roomNumber)).toBeVisible();
+    await expect(adminRoomsPage.roomRow(room.roomName)).toBeVisible();
   } finally {
-    await adminRoomsPage.deleteRoom(roomNumber);
+    await adminRoomsPage.deleteRoom(room.roomName);
   }
-  await expect(adminRoomsPage.roomRow(roomNumber)).toBeHidden();
+  await expect(adminRoomsPage.roomRow(room.roomName)).toBeHidden();
 });

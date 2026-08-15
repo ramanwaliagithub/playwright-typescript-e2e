@@ -670,3 +670,130 @@ Phase 4 complete: typed, schema-validated API client covering rooms/bookings/mes
 used both for standalone contract tests and as a seeding utility for a UI test — plus three
 real, non-hypothetical bugs found and fixed by actually running everything against the live
 shared instance instead of trusting the implementation on paper.
+
+---
+
+## Phase 5 — Test Data & Config Management
+
+### 1. `config/env.ts` — the one place `process.env` gets read
+
+```ts
+const EnvSchema = z.object({
+  TEST_ENV: z.enum(['hosted', 'local']).default('hosted'),
+  BASE_URL: z.string().url().optional(),
+  ADMIN_USERNAME: z.string().default('admin'),
+  ADMIN_PASSWORD: z.string().default('password'),
+});
+
+export const env = EnvSchema.parse(process.env);
+```
+
+Reused zod (already a dependency since Phase 4's API schemas) rather than hand-rolling
+validation. `z.object` strips unrecognized keys by default, so `process.env`'s hundreds of
+unrelated OS/shell variables pass through harmlessly — only the 4 keys above are extracted and
+validated. `.parse()` throws immediately on load if something's wrong, which is exactly the
+"fail fast with a clear error" behavior a typed config loader should have — previously
+`config/environments.ts` read `process.env['TEST_ENV']` directly and silently fell back to
+`'hosted'` on anything unrecognized, including a typo.
+
+### 2. Base + per-environment override layering
+
+Split the old single `config/environments.ts` (two fully-independent flat objects) into:
+
+- `config/base.ts` — `baseEnvironmentConfig`, the defaults every environment starts from.
+- `config/environments.ts` — a `Partial<EnvironmentConfig>` per environment (only what's
+  actually different), merged onto the base via a small `layer()` helper
+  (`{ ...baseEnvironmentConfig, ...override }`). `local`'s override is now just `{ baseURL:
+'http://localhost' }` — every other field (retries, timeouts) inherits the base default
+  instead of repeating it.
+- Now imports `env.TEST_ENV` (validated) instead of reading `process.env` itself.
+
+### 3. Wire `env` through the rest of config
+
+`config/credentials.ts` and `playwright.config.ts`'s `BASE_URL` override both switched from
+`process.env['X']` to `env.X`. After this, `config/env.ts` is the _only_ file in the repo that
+touches `process.env`.
+
+### 4. Verify the validation actually fires
+
+```bash
+TEST_ENV=bogus pnpm exec playwright test --list
+```
+
+```
+ZodError: [
+  {
+    "expected": "\"hosted\" | \"local\"",
+    "code": "invalid_type",
+    ...
+    "path": ["TEST_ENV"],
+    "message": "Invalid option: expected one of \"hosted\"|\"local\""
+  }
+]
+```
+
+Fails immediately at config-load time with the exact allowed values named — not a vague
+downstream Playwright error.
+
+### 5. Test data factories
+
+```bash
+pnpm add -D @faker-js/faker
+```
+
+- `data/guestFactory.ts` — `buildGuest(overrides?)`: first/last name, email, phone.
+- `data/roomFactory.ts` — `buildNewRoom(overrides?)`: room number (via Phase 4's
+  `uniqueSuffix()`), type, accessible, price, features.
+- `data/bookingFactory.ts` — `buildNewBooking(overrides?)`: built from `buildGuest()` +
+  `randomStayDates()` (Phase 3/4's collision-safe date helper), plus `depositpaid`.
+- `data/messageFactory.ts` — `buildNewMessage(overrides?)`: built from `buildGuest()`, plus a
+  random subject/description.
+
+Every factory takes an `overrides` param so a test can pin down exactly the fields it cares
+about (`buildNewBooking({ roomid: 1 })`) while getting realistic, collision-safe random data
+for everything else. Removed `data/.gitkeep` now that the folder has real content.
+
+**A `strict`/`exactOptionalPropertyTypes` wrinkle:** `buildNewRoom`'s return type was
+originally annotated `: NewRoom`, where the API's `NewRoom.features` is _optional_
+(`features?: RoomFeature[]`) since a direct API caller might not specify it. But the factory
+_always_ assigns a value — annotating the return type widened it back to
+`RoomFeature[] | undefined` anyway, which then failed `admin-rooms.spec.ts`'s
+`exactOptionalPropertyTypes: true` check when passed to `AdminRoomsPage.createRoom`. Fixed by
+using `satisfies NewRoom` instead of a `: NewRoom` annotation — this checks assignability
+without widening the inferred type, so `features` stays known-always-present on the factory's
+actual return value.
+
+### 6. Refactor existing tests onto the factories
+
+- `tests/booking.spec.ts` — `fillGuestDetails({ firstName: 'Jane', ... })` → `fillGuestDetails(buildGuest())`.
+- `tests/admin-rooms.spec.ts` / `tests/room-seeded-via-api.spec.ts` — inline room objects →
+  `buildNewRoom()`, mapped to whichever shape the call site needs (the admin UI form takes
+  `price` as a string; the API takes `roomPrice` as a number — the factory produces the API
+  shape, call sites adapt at the boundary rather than forcing one factory to serve both).
+- `tests/api/bookings.spec.ts` — hardcoded `firstname: 'Api', lastname: 'ContractTest'` and a
+  fixed future date → `buildNewBooking({ roomid: 1 })`.
+- `tests/api/messages.spec.ts` — hardcoded name/email/phone/description → `buildNewMessage({
+subject })` (subject still explicit — the test needs a known value to search for
+  afterward), and the assertion now compares against the actual built object
+  (`toMatchObject({ ...message })`) instead of duplicating literals that could drift from what
+  was actually sent.
+
+`toMatchObject` needed the `{ ...message }` spread — passing the `NewMessage`-typed variable
+directly hit `Argument ... not assignable to Record<string, unknown>: Index signature for type
+'string' is missing`, a strict-mode quirk where a named interface isn't accepted where a
+literal/indexable shape is expected; a fresh object literal (via spread) satisfies it.
+
+### 7. Proof
+
+```bash
+pnpm run typecheck   # clean
+pnpm run lint         # clean
+
+pnpm run test:hosted
+# Running 21 tests using 8 workers
+#   21 passed (30.5s)
+```
+
+Phase 5 complete: config is layered (base + per-env overrides) and centrally validated (one
+zod-checked entry point for all env/secrets), and every test that creates data now does so via
+a realistic, collision-safe, overridable factory instead of a hardcoded literal.

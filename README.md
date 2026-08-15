@@ -76,10 +76,14 @@ clutter. Here's what each one does and why it's here:
 | `lint-staged` (config lives inside `package.json`) | Used by the pre-commit hook to run ESLint/Prettier only on the files you actually staged for that commit, instead of relinting the entire repo every time.                                                                                                                                                       |
 | `.env.example`                                     | A checked-in template showing which environment variables the project expects (`BASE_URL`, admin creds), with placeholder/default values. You copy it to `.env` locally; `.env` itself is gitignored so real secrets never get committed.                                                                        |
 | `playwright.config.ts`                             | Playwright's own config — which browsers to run, the base URL under test, retries, and what failure artifacts (trace/video/screenshot) to keep.                                                                                                                                                                  |
-| `config/environments.ts`                           | Per-`TEST_ENV` settings (base URL, retries, action/navigation timeouts) that `playwright.config.ts` reads from. Will grow into the full typed config loader in Phase 5.                                                                                                                                          |
+| `config/env.ts`                                    | The **only** place `process.env` is read. Parses it through a zod schema — a malformed value (e.g. `TEST_ENV=hosed`) fails immediately with a clear error instead of silently falling back to a default.                                                                                                         |
+| `config/base.ts`                                   | Shared default settings (`baseEnvironmentConfig`) every environment starts from.                                                                                                                                                                                                                                 |
+| `config/environments.ts`                           | Per-`TEST_ENV` settings (base URL, retries, action/navigation timeouts), each one layered as `{ ...base, ...override }` on top of `config/base.ts`, that `playwright.config.ts` reads from.                                                                                                                      |
+| `config/credentials.ts`                            | Admin credentials, sourced from `config/env.ts` (never hardcoded, never read from `process.env` directly).                                                                                                                                                                                                       |
 | `fixtures/pages.fixture.ts`                        | Wires Page Objects and the API client into tests via Playwright's `test.extend`. Tests import `test`/`expect` from here instead of `@playwright/test` directly.                                                                                                                                                  |
 | `api/schemas.ts`                                   | Zod schemas for every RBP API response shape, plus their inferred TypeScript types (`z.infer`) — one source of truth instead of hand-maintained interfaces that can drift from reality.                                                                                                                          |
 | `api/RbpApiClient.ts`                              | Typed wrapper over RBP's REST API (`APIRequestContext`-based). Every response is parsed through its zod schema, so an API shape change fails loudly here instead of silently breaking a test.                                                                                                                    |
+| `data/*Factory.ts`                                 | Test data builders (`buildGuest`, `buildNewRoom`, `buildNewBooking`, `buildNewMessage`) using `@faker-js/faker` for realistic random values, with an `overrides` param for whatever a specific test needs to pin down. Replaces hardcoded literals (`'Jane'`, `'jane.doe@example.com'`, ...) scattered in specs. |
 
 ## Project structure
 
@@ -90,8 +94,8 @@ clutter. Here's what each one does and why it's here:
 | `fixtures/` | Playwright `test.extend` fixtures wiring pages/API client into tests (Phase 3-4) |
 | `utils/`    | Shared helpers (e.g. collision-safe random test data)                            |
 | `api/`      | API client wrapper + zod schemas / typed models (Phase 4)                        |
-| `config/`   | Environment config + credentials loader (full typed loader lands in Phase 5)     |
-| `data/`     | Test data factories (Phase 5)                                                    |
+| `config/`   | Zod-validated env loader, layered per-environment config, credentials (Phase 5)  |
+| `data/`     | Test data factories, built on `@faker-js/faker` (Phase 5)                        |
 | `ci/`       | GitHub Actions workflow support files (Phase 8)                                  |
 | `infra/`    | Terraform modules (Phase 9)                                                      |
 
@@ -129,6 +133,25 @@ clutter. Here's what each one does and why it's here:
   each validates the real response shape and round-trips create → read → delete), and as a
   **seeding utility** for a UI test (`tests/room-seeded-via-api.spec.ts` creates a room via the
   API, then verifies it shows up in the admin rooms panel UI).
+
+## Test Data & Config Management
+
+- **Config is layered, not duplicated per environment.** `config/base.ts` holds shared
+  defaults; `config/environments.ts` defines only what's actually different for `hosted`
+  (different base URL, more retries/timeouts) and `local` (only the base URL differs — every
+  other field inherits the base default). Adding a third environment means writing just its
+  deltas, not a full new object.
+- **`config/env.ts` is the only place `process.env` is read**, parsed through a zod schema. A
+  typo'd `TEST_ENV` or a malformed `BASE_URL` fails immediately with a precise error at
+  startup, not a confusing failure three steps later. `config/credentials.ts` and
+  `config/environments.ts` both read from this validated `env`, never `process.env` directly.
+- **Test data comes from factories, not hardcoded literals.** `data/guestFactory.ts`,
+  `roomFactory.ts`, `bookingFactory.ts`, and `messageFactory.ts` each expose a `buildX()`
+  function backed by `@faker-js/faker`, returning realistic random data with every field
+  overridable (`buildNewBooking({ roomid: 1 })`). Built on top of Phase 4's typed request/
+  response interfaces and Phase 3/4's collision-safe `utils/` helpers, so a factory's output is
+  always both realistic _and_ safe to run 3-wide in parallel against the shared hosted
+  instance.
 
 ## Phase log
 
@@ -246,6 +269,29 @@ Running 21 tests using 8 workers
   21 passed (29.9s)
 ```
 
-Next up (Phase 5, pending go-ahead): test data & config management — environment config
-layering, a typed config loader, secrets handling, and test data factories built on this
-phase's API client.
+### Phase 5 — Test Data & Config Management
+
+- `config/base.ts` + `config/environments.ts` refactored into real base/override layering (see
+  "Test Data & Config Management" above) instead of two fully-independent flat objects.
+- `config/env.ts` — zod-validated typed env loader; `config/credentials.ts` and
+  `playwright.config.ts` now read from it instead of `process.env` directly. Verified it
+  actually rejects bad input: `TEST_ENV=bogus pnpm exec playwright test --list` fails with a
+  precise zod error naming the allowed values, instead of silently defaulting.
+- `data/guestFactory.ts`, `roomFactory.ts`, `bookingFactory.ts`, `messageFactory.ts` — added
+  `@faker-js/faker`-backed builders and refactored every test that previously hardcoded guest/
+  room/booking/message literals (`booking.spec.ts`, `admin-rooms.spec.ts`,
+  `room-seeded-via-api.spec.ts`, `tests/api/bookings.spec.ts`, `tests/api/messages.spec.ts`) to
+  use them instead.
+
+```
+$ TEST_ENV=bogus pnpm exec playwright test --list
+ZodError: [{ "message": "Invalid option: expected one of \"hosted\"|\"local\"", "path": ["TEST_ENV"], ... }]
+
+$ pnpm run test:hosted
+Running 21 tests using 8 workers
+...
+  21 passed (30.5s)
+```
+
+Next up (Phase 6, pending go-ahead): reporting & diagnostics — HTML report + Allure, and
+verifying failure artifacts (trace/video/screenshot) by deliberately failing a test.

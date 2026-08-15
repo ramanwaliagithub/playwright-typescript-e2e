@@ -1,8 +1,9 @@
 import 'dotenv/config';
 import { defineConfig, devices } from '@playwright/test';
 import { environmentConfig } from './config/environments.js';
+import { env } from './config/env.js';
 
-const baseURL = process.env['BASE_URL'] ?? environmentConfig.baseURL;
+const baseURL = env.BASE_URL ?? environmentConfig.baseURL;
 
 export default defineConfig({
   testDir: './tests',

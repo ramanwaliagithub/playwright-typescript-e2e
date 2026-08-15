@@ -1,4 +1,6 @@
+import { env } from './env.js';
+
 export const adminCredentials = {
-  username: process.env['ADMIN_USERNAME'] ?? 'admin',
-  password: process.env['ADMIN_PASSWORD'] ?? 'password',
+  username: env.ADMIN_USERNAME,
+  password: env.ADMIN_PASSWORD,
 };

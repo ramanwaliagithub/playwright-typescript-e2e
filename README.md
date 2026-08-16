@@ -42,6 +42,8 @@ pnpm run test:local    # force TEST_ENV=local (requires RBP running at http://lo
 pnpm run test:headed   # same as `pnpm test`, with browser UI visible
 pnpm run test:ui       # Playwright's interactive UI mode
 pnpm run report        # open the last HTML report
+pnpm run report:allure       # generate the Allure report from the last run's raw results
+pnpm run report:allure:open  # serve + open the generated Allure report
 ```
 
 `BASE_URL` can still be set directly to override the environment's default base URL for a
@@ -75,7 +77,7 @@ clutter. Here's what each one does and why it's here:
 | `.husky/`                                          | [Husky](https://typicode.github.io/husky/) wires git hooks into the repo so they run for _everyone_ who clones it, not just on one person's machine. `.husky/pre-commit` runs automatically on every `git commit` and currently runs `lint-staged` + `pnpm run typecheck` — a commit is blocked if either fails. |
 | `lint-staged` (config lives inside `package.json`) | Used by the pre-commit hook to run ESLint/Prettier only on the files you actually staged for that commit, instead of relinting the entire repo every time.                                                                                                                                                       |
 | `.env.example`                                     | A checked-in template showing which environment variables the project expects (`BASE_URL`, admin creds), with placeholder/default values. You copy it to `.env` locally; `.env` itself is gitignored so real secrets never get committed.                                                                        |
-| `playwright.config.ts`                             | Playwright's own config — which browsers to run, the base URL under test, retries, and what failure artifacts (trace/video/screenshot) to keep.                                                                                                                                                                  |
+| `playwright.config.ts`                             | Playwright's own config — which browsers to run, the base URL under test, retries, reporters (HTML + Allure), and what failure artifacts (trace/video/screenshot) to keep.                                                                                                                                       |
 | `config/env.ts`                                    | The **only** place `process.env` is read. Parses it through a zod schema — a malformed value (e.g. `TEST_ENV=hosed`) fails immediately with a clear error instead of silently falling back to a default.                                                                                                         |
 | `config/base.ts`                                   | Shared default settings (`baseEnvironmentConfig`) every environment starts from.                                                                                                                                                                                                                                 |
 | `config/environments.ts`                           | Per-`TEST_ENV` settings (base URL, retries, action/navigation timeouts), each one layered as `{ ...base, ...override }` on top of `config/base.ts`, that `playwright.config.ts` reads from.                                                                                                                      |
@@ -152,6 +154,21 @@ clutter. Here's what each one does and why it's here:
   response interfaces and Phase 3/4's collision-safe `utils/` helpers, so a factory's output is
   always both realistic _and_ safe to run 3-wide in parallel against the shared hosted
   instance.
+
+## Reporting & Diagnostics
+
+- Two reporters run on every test execution: Playwright's built-in **HTML** report
+  (`pnpm run report`) and **Allure** (`allure-playwright` writes raw results to
+  `allure-results/`; `pnpm run report:allure` turns them into a browsable report in
+  `allure-report/`, `report:allure:open` serves and opens it). Both are gitignored — generated
+  per run, never committed.
+- Failure artifacts are on-failure-only for both reporters: `trace: 'retain-on-failure'`,
+  `screenshot: 'only-on-failure'`, `video: 'retain-on-failure'` (set in Phase 2). Verified this
+  actually works, not just configured: ran a deliberately-failing test and confirmed Playwright
+  wrote a `screenshot.png`/`video.webm`/`trace.zip` to `test-results/`, **and** that
+  `allure-playwright` independently attached its own copies of all three (plus an
+  `error-context.md`) to the Allure result, with correct MIME types
+  (`image/png`, `video/webm`, `application/vnd.allure.playwright-trace`).
 
 ## Phase log
 
@@ -293,5 +310,29 @@ Running 21 tests using 8 workers
   21 passed (30.5s)
 ```
 
-Next up (Phase 6, pending go-ahead): reporting & diagnostics — HTML report + Allure, and
-verifying failure artifacts (trace/video/screenshot) by deliberately failing a test.
+### Phase 6 — Reporting & Diagnostics
+
+- `allure-playwright` + `allure-commandline` added; `playwright.config.ts`'s `reporter` is now
+  `[['html'], ['allure-playwright']]` — both run on every execution, not just one or the other.
+- `report:allure` / `report:allure:open` npm scripts for generating and viewing the Allure
+  report. `.gitignore` already covered `allure-results/`/`allure-report/` since Phase 1.
+- Proved reporting works two ways: a full clean run showed 21/21 passed identically in both the
+  HTML report and Allure's `widgets/summary.json`. Then a temporary, deliberately-failing test
+  (never committed) confirmed failure artifacts are actually captured, not just configured —
+  Playwright's `test-results/` had the screenshot/video/trace files, and Allure's raw result
+  JSON referenced the same three (plus an error-context markdown) as properly-typed attachments
+  nested under the test's steps.
+
+```
+$ pnpm run test:hosted
+Running 21 tests using 8 workers
+...
+  21 passed (19.6s)
+
+# deliberate-failure verification (temp test, removed after):
+attachments: screenshot (image/png), video (video/webm),
+             trace (application/vnd.allure.playwright-trace), error-context (text/markdown)
+```
+
+Next up (Phase 7, pending go-ahead): Dockerize — Playwright's official base image, with the
+suite proven to run identically in-container and on the host.

@@ -797,3 +797,133 @@ pnpm run test:hosted
 Phase 5 complete: config is layered (base + per-env overrides) and centrally validated (one
 zod-checked entry point for all env/secrets), and every test that creates data now does so via
 a realistic, collision-safe, overridable factory instead of a hardcoded literal.
+
+---
+
+## Phase 6 — Reporting & Diagnostics
+
+### 1. Add Allure alongside the existing HTML report
+
+```bash
+pnpm add -D allure-playwright allure-commandline
+```
+
+`allure-commandline` wraps the Java-based Allure CLI as an npm package (no separate global
+install) — it needs a JVM, which JDK 26 (installed back in Phase 1 for RBP's local Maven build)
+already provides on this machine. Verified before relying on it:
+
+```bash
+pnpm exec allure --version
+# 2.43.0
+```
+
+Changed `playwright.config.ts`'s `reporter` from the bare string `'html'` to an array so both
+run every time:
+
+```ts
+reporter: [['html'], ['allure-playwright']],
+```
+
+Added two scripts:
+
+```json
+"report:allure": "allure generate allure-results --clean -o allure-report",
+"report:allure:open": "allure open allure-report"
+```
+
+`.gitignore` already had `allure-results/`/`allure-report/` entries from Phase 1's initial
+scaffolding — nothing to add there.
+
+### 2. Prove both reporters actually produce a report
+
+```bash
+pnpm run test:hosted
+# 21 passed (28.8s)
+```
+
+Confirmed `playwright-report/index.html` existed and `allure-results/` had exactly 21
+`*-result.json` files (one per test). Generated the Allure report and read its summary widget
+directly rather than trusting "no errors was printed":
+
+```bash
+pnpm run report:allure
+node -e "console.log(require('./allure-report/widgets/summary.json').statistic)"
+# { failed: 0, broken: 0, skipped: 0, passed: 21, unknown: 0, total: 21 }
+```
+
+### 3. Deliberately fail a test — the actual point of this phase
+
+Wrote a throwaway `tests/_temp-deliberate-failure.spec.ts` (never committed) asserting an
+impossible page title, to verify failure artifacts are genuinely captured, not just configured:
+
+```ts
+test('deliberate failure to verify artifact capture', async ({ page, bookingHomePage }) => {
+  await bookingHomePage.open();
+  await expect(page).toHaveTitle(/this-title-will-never-match-xyz/);
+});
+```
+
+First attempt used `--reporter=list` on the CLI to get readable console output — which turned
+out to **completely override** the array of reporters configured in `playwright.config.ts`, so
+`allure-playwright` silently didn't run and `allure-results/` was never created. Re-ran without
+that flag (letting the configured `[html, allure-playwright]` reporters run as normal, still
+readable from the terminal's own failure summary) and both fired correctly.
+
+Confirmed on disk, not just by absence of errors:
+
+```bash
+find test-results -type f
+# .../test-failed-1.png, video.webm, trace.zip, error-context.md
+```
+
+Allure's top-level `result.json` has an empty `attachments: []` at the root — attachments live
+nested inside the step tree, not flattened at the top. Walked the tree to find them:
+
+```bash
+node -e "
+  const r = require('./allure-results/<uuid>-result.json');
+  function find(node, path) {
+    if (node.attachments?.length) console.log(path, JSON.stringify(node.attachments));
+    for (const s of node.steps || []) find(s, path + ' > ' + s.name);
+  }
+  find(r, r.name);
+"
+```
+
+```
+... > screenshot      [{"name":"screenshot","source":"...png","type":"image/png"}]
+... > video           [{"name":"video","source":"...webm","type":"video/webm"}]
+... > error-context   [{"name":"error-context","source":"...md","type":"text/markdown"}]
+... > trace           [{"name":"trace","source":"...zip","type":"application/vnd.allure.playwright-trace"}]
+```
+
+All four attached with correct MIME types. Regenerated the Allure report against this failure
+run too and confirmed its summary showed `{ failed: 1, passed: 0, total: 1 }` — the failure
+renders, not just gets recorded.
+
+### 4. Clean up
+
+```bash
+rm tests/_temp-deliberate-failure.spec.ts
+rm -rf test-results playwright-report allure-results allure-report
+```
+
+The temporary failing test was never meant to be committed — it existed purely to prove
+artifact capture works, per the phase's own instructions ("verified by deliberately failing a
+test"), not to become a permanently broken test in the suite. Re-ran the real suite clean
+afterward to confirm nothing was left in a bad state.
+
+### 5. Proof
+
+```bash
+pnpm run typecheck   # clean
+pnpm run lint        # clean
+
+pnpm run test:hosted
+# Running 21 tests using 8 workers
+#   21 passed (19.6s)
+```
+
+Phase 6 complete: Allure runs alongside the existing HTML reporter on every execution, and
+failure-artifact capture (trace/video/screenshot) is verified working in both, not just
+configured and assumed.

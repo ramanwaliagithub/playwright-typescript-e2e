@@ -9,7 +9,7 @@ export default defineConfig({
   testDir: './tests',
   fullyParallel: true,
   retries: environmentConfig.retries,
-  reporter: 'html',
+  reporter: [['html'], ['allure-playwright']],
   use: {
     baseURL,
     actionTimeout: environmentConfig.actionTimeout,

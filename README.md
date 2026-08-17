@@ -86,6 +86,8 @@ clutter. Here's what each one does and why it's here:
 | `api/schemas.ts`                                   | Zod schemas for every RBP API response shape, plus their inferred TypeScript types (`z.infer`) — one source of truth instead of hand-maintained interfaces that can drift from reality.                                                                                                                          |
 | `api/RbpApiClient.ts`                              | Typed wrapper over RBP's REST API (`APIRequestContext`-based). Every response is parsed through its zod schema, so an API shape change fails loudly here instead of silently breaking a test.                                                                                                                    |
 | `data/*Factory.ts`                                 | Test data builders (`buildGuest`, `buildNewRoom`, `buildNewBooking`, `buildNewMessage`) using `@faker-js/faker` for realistic random values, with an `overrides` param for whatever a specific test needs to pin down. Replaces hardcoded literals (`'Jane'`, `'jane.doe@example.com'`, ...) scattered in specs. |
+| `Dockerfile`                                       | Builds the suite into a container image from Playwright's official base image, pinned to the exact `@playwright/test` version so the browser binaries baked into the image match the npm package.                                                                                                                |
+| `.dockerignore`                                    | Keeps `node_modules/`, `.git/`, report/result directories, and `.env` out of the image build context.                                                                                                                                                                                                            |
 
 ## Project structure
 
@@ -154,6 +156,19 @@ clutter. Here's what each one does and why it's here:
   response interfaces and Phase 3/4's collision-safe `utils/` helpers, so a factory's output is
   always both realistic _and_ safe to run 3-wide in parallel against the shared hosted
   instance.
+
+## Running in Docker
+
+```bash
+docker build -t rbp-e2e-tests .
+docker run --rm -e TEST_ENV=hosted rbp-e2e-tests
+```
+
+The base image (`mcr.microsoft.com/playwright:v1.62.1-noble`) is pinned to match the exact
+`@playwright/test` version in `package.json` — its baked-in browser binaries must match the npm
+package version exactly, or tests fail to launch. Pass any env var the framework needs (see
+`.env.example`) via `-e`; there's no `.env` inside the image (`.dockerignore` excludes it), so
+secrets are never baked into a layer.
 
 ## Reporting & Diagnostics
 
@@ -334,5 +349,28 @@ attachments: screenshot (image/png), video (video/webm),
              trace (application/vnd.allure.playwright-trace), error-context (text/markdown)
 ```
 
-Next up (Phase 7, pending go-ahead): Dockerize — Playwright's official base image, with the
-suite proven to run identically in-container and on the host.
+### Phase 7 — Dockerize (in progress)
+
+**Day 1 — base image, build, smoke test in-container:**
+
+- `Dockerfile` from `mcr.microsoft.com/playwright:v1.62.1-noble`, pinned to match
+  `@playwright/test`'s exact installed version (verified the tag exists via `docker manifest
+inspect` before committing to it, rather than guessing).
+- `.dockerignore` excludes `node_modules`, `.git`, report/result directories, and `.env` — same
+  lesson as Phase 1's RBP build-context bug, applied preemptively this time.
+- **Real incident, not a framework bug:** the build hit `write .../metadata_v2.db: read-only
+file system`. Root cause was the host machine's `C:` drive at ~7MB free, which had put Docker
+  Desktop's internal WSL2 disk into a protective read-only remount. Diagnosed with read-only,
+  non-destructive scans (never deleted anything without asking); user chose a full Docker
+  Desktop purge, done via deleting `docker_data.vhdx` directly (Docker Desktop stopped first) —
+  reclaimed ~10GB, taking free space from ~7MB to ~16.5GB. Full detail in `SETUP.md`.
+- Smoke test passed in-container against the hosted instance:
+
+  ```
+  $ docker run --rm -e TEST_ENV=hosted rbp-e2e-tests pnpm exec playwright test tests/smoke.spec.ts --project=chromium
+  Running 1 test using 1 worker
+  [1/1] [chromium] › tests/smoke.spec.ts:3:1 › RBP booking homepage loads
+    1 passed (2.2s)
+  ```
+
+Day 2 (pending go-ahead): full suite in-container, parity check against a local run.

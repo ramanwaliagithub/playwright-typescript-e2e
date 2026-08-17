@@ -927,3 +927,145 @@ pnpm run test:hosted
 Phase 6 complete: Allure runs alongside the existing HTML reporter on every execution, and
 failure-artifact capture (trace/video/screenshot) is verified working in both, not just
 configured and assumed.
+
+---
+
+## Phase 7 — Dockerize
+
+**Pacing note:** starting this phase, work is now paused after each day-chunk within a phase,
+not just at phase boundaries — user asked directly whether the roadmap's day-breakdown was
+being treated as a literal pacing plan (it hadn't been; Phases 1-6 each ran to completion in
+one pass) and chose to tighten it. This file's Phase 7 section will grow one day-chunk at a
+time as a result, rather than all at once like earlier phases.
+
+### Day 1 — base image, build, smoke test in-container
+
+#### 1. Pin the base image to the exact installed Playwright version
+
+`@playwright/test` is `1.62.1`. Confirmed the matching Docker tag actually exists before
+writing the Dockerfile around it, rather than guessing from Playwright's docs (which only had
+`v1.62.0` examples at the time):
+
+```bash
+docker manifest inspect mcr.microsoft.com/playwright:v1.62.1-noble
+# (returns a valid multi-arch manifest — tag exists)
+```
+
+Wrote `Dockerfile`:
+
+```dockerfile
+FROM mcr.microsoft.com/playwright:v1.62.1-noble
+WORKDIR /app
+RUN corepack enable
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
+COPY . .
+CMD ["pnpm", "test"]
+```
+
+and `.dockerignore` (`node_modules`, `.git`, report/result directories, `.env`,
+`E2E_manual.md`) — applying Phase 1's RBP build-context lesson (an unexcluded `node_modules`
+caused a Windows resource-exhaustion error back then) preemptively this time, instead of
+discovering it the same way twice.
+
+#### 2. Docker Desktop's WSL2 backend broke again — different failure mode this time
+
+```bash
+docker build -t rbp-e2e-tests:latest .
+```
+
+First attempt failed immediately:
+
+```
+ERROR: failed to connect to the docker API at npipe:////./pipe/dockerDesktopLinuxEngine
+```
+
+Same category of problem as Phase 1 (Docker Desktop/WSL2 instability), so applied the same
+known fix — `wsl --shutdown` — after re-confirming with the user first (it's machine-wide, not
+scoped to this project, same as last time). Docker reconnected within seconds. Retried the
+build; this time it got further but failed differently:
+
+```
+ERROR: write /var/lib/docker/buildkit/containerd-overlayfs/metadata_v2.db: read-only file system
+```
+
+#### 3. Root cause: the host disk itself was full
+
+```powershell
+Get-PSDrive -Name C | Select-Object Used,Free
+```
+
+Free space: **~7MB**. An ext4 filesystem (which is what Docker Desktop's WSL2 disk uses
+internally) remounts itself read-only as a protective measure when the underlying disk fills
+up — that's what actually broke the build, not Docker itself being unhealthy. `wsl --shutdown`
+had only fixed the _previous_ symptom (the pipe connection), not this one.
+
+This is a host-level problem, not scoped to this project, and involves deleting things outside
+this repo's control — stopped and asked before doing anything. User asked for a read-only
+investigation first. Ran non-destructive size scans, drilling down one level at a time
+(`C:\` → `C:\Users` → `AppData` → `AppData\Local`) rather than one giant recursive scan, to keep
+each command fast enough to actually finish:
+
+```
+C:\Users                     57.75 GB   →  hp\AppData\Local  43.77 GB   →
+  Packages        10.92 GB   (Windows Store app data)
+  Docker          10.40 GB   (Docker Desktop's own data)
+  Programs         7.96 GB
+  ms-playwright     2.41 GB  (our own browser binaries)
+  ...
+```
+
+Presented this breakdown and let the user choose the cleanup approach rather than picking one
+unilaterally — they chose a full Docker Desktop purge (reclaims the ~10GB `Docker` folder, at
+the cost of wiping _all_ Docker images/containers/volumes/build cache on the machine, not just
+this project's).
+
+#### 4. Executing the purge
+
+Docker Desktop's GUI "Clean / Purge data" has a CLI-scriptable equivalent. `wsl -l -v` showed
+only one Docker-related distro (`docker-desktop` — no separate `-data` distro on this Docker
+Desktop version). Stopped Docker Desktop's processes first, then:
+
+```powershell
+wsl --unregister docker-desktop
+```
+
+This only reclaimed ~0.7GB — nowhere near the ~10GB expected. The actual data disk turned out
+to live outside the named-distro registration entirely, at
+`%LOCALAPPDATA%\Docker\wsl\disk\docker_data.vhdx` (10.29GB, found by searching for `*.vhdx`
+files directly rather than assuming the distro list was the whole picture). Deleted it directly
+(safe since Docker Desktop's processes were already stopped):
+
+```powershell
+Remove-Item "$env:LOCALAPPDATA\Docker\wsl\disk\docker_data.vhdx" -Force
+```
+
+Free space went from ~7MB to **16.53GB**. Relaunched Docker Desktop from its actual install
+path — `%LOCALAPPDATA%\Programs\DockerDesktop\Docker Desktop.exe`, _not_ `C:\Program Files\...`
+(this install was per-user, not machine-wide; the standard path guess failed first). Docker
+came back healthy with a fresh, empty data disk (confirmed via `docker system df`: 0 images, 0
+containers, 0 build cache).
+
+#### 5. Build + verify
+
+```bash
+docker build -t rbp-e2e-tests:latest .
+# ... succeeds. One harmless warning during `pnpm install`'s `prepare` script:
+#   $ husky
+#   .git can't be found
+# Expected — .dockerignore excludes .git, and git hooks are meaningless inside a container
+# that only runs tests, never commits. Does not fail the build.
+
+docker images rbp-e2e-tests
+# rbp-e2e-tests:latest   3.87GB disk / 1.03GB content
+
+docker run --rm -e TEST_ENV=hosted rbp-e2e-tests:latest \
+  pnpm exec playwright test tests/smoke.spec.ts --project=chromium
+# Running 1 test using 1 worker
+# [1/1] [chromium] › tests/smoke.spec.ts:3:1 › RBP booking homepage loads
+#   1 passed (2.2s)
+```
+
+Day 1 complete: image builds cleanly, smoke test passes in-container against the real hosted
+instance. Day 2 (full suite in-container + host parity check) is a separate go-ahead per the
+new day-chunk pacing.

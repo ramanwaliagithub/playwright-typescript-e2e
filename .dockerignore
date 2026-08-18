@@ -8,3 +8,6 @@ allure-report
 .env
 E2E_manual.md
 *.log
+*.tsbuildinfo
+.vscode
+.idea

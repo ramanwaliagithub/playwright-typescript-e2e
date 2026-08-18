@@ -356,7 +356,7 @@ attachments: screenshot (image/png), video (video/webm),
              trace (application/vnd.allure.playwright-trace), error-context (text/markdown)
 ```
 
-### Phase 7 — Dockerize (in progress)
+### Phase 7 — Dockerize
 
 **Day 1 — base image, build, smoke test in-container:**
 
@@ -399,4 +399,21 @@ Running 21 tests using 8 workers
   21 passed (34.8s)
 ```
 
-Day 3 (pending go-ahead): documentation/buffer — finalize the Docker run instructions here.
+**Day 3 — finalize:**
+
+- `.dockerignore` rounded out with `*.tsbuildinfo`, `.vscode`, `.idea` (parity with
+  `.gitignore`'s OS/editor/build-artifact exclusions).
+- Re-verified end to end after the `.dockerignore` change — one `booking.spec.ts` run hit the
+  usual shared-hosted-instance transient flake (retried and passed, same class of flakiness
+  documented since Phase 3, unrelated to Docker) — otherwise clean.
+
+```
+$ docker run --rm -e TEST_ENV=hosted rbp-e2e-tests pnpm test
+...
+  1 flaky
+  20 passed (27.3s)
+```
+
+Next up (Phase 8, pending go-ahead): GitHub Actions PR checks — lint, typecheck, and a sharded
+smoke-test subset gating every pull request. Needs your branch protection expectations before
+its final day (required status check + rule application).

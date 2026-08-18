@@ -1143,3 +1143,24 @@ pnpm run lint        # clean
 Phase 7 Day 2 complete: full suite runs identically in-container and on the host, and reports
 generated inside the container are accessible on the host via volume mounts. Day 3 (docs/buffer)
 is a separate go-ahead.
+
+### Day 3 — finalize
+
+Rounded out `.dockerignore` to match `.gitignore`'s OS/editor/build-artifact exclusions
+(`*.tsbuildinfo`, `.vscode`, `.idea`) — nothing in the earlier list was wrong, just incomplete.
+Rebuilt (fully layer-cached except the final `COPY . .`) and ran the suite twice more in-
+container to confirm the change didn't regress anything:
+
+```bash
+docker build -t rbp-e2e-tests:latest .
+docker run --rm -e TEST_ENV=hosted rbp-e2e-tests:latest pnpm test
+```
+
+First run hit one flaky `booking.spec.ts` failure on webkit, retried, passed — the same class
+of shared-hosted-instance transient flakiness documented since Phase 3, not a Docker or
+`.dockerignore` regression. Second run was clean. `pnpm run typecheck`/`pnpm run lint` both
+still pass.
+
+Phase 7 complete: image builds cleanly, pinned to the exact installed Playwright version;
+smoke test and full suite both verified in-container with results matching a host run;
+reports accessible on the host via volume mounts; `.dockerignore` finalized.

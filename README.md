@@ -161,14 +161,21 @@ clutter. Here's what each one does and why it's here:
 
 ```bash
 docker build -t rbp-e2e-tests .
-docker run --rm -e TEST_ENV=hosted rbp-e2e-tests
+
+# Reports/results only exist inside the container unless you mount them out:
+docker run --rm -e TEST_ENV=hosted \
+  -v "$(pwd)/test-results:/app/test-results" \
+  -v "$(pwd)/playwright-report:/app/playwright-report" \
+  -v "$(pwd)/allure-results:/app/allure-results" \
+  rbp-e2e-tests
 ```
 
 The base image (`mcr.microsoft.com/playwright:v1.62.1-noble`) is pinned to match the exact
 `@playwright/test` version in `package.json` — its baked-in browser binaries must match the npm
 package version exactly, or tests fail to launch. Pass any env var the framework needs (see
 `.env.example`) via `-e`; there's no `.env` inside the image (`.dockerignore` excludes it), so
-secrets are never baked into a layer.
+secrets are never baked into a layer. Verified (Phase 7 Day 2) that a full run in-container
+produces identical results to a local host run.
 
 ## Reporting & Diagnostics
 
@@ -373,4 +380,23 @@ file system`. Root cause was the host machine's `C:` drive at ~7MB free, which h
     1 passed (2.2s)
   ```
 
-Day 2 (pending go-ahead): full suite in-container, parity check against a local run.
+**Day 2 — full suite in-container, parity with a local run:**
+
+- Mounted `test-results/`, `playwright-report/`, and `allure-results/` as volumes so reports
+  generated inside the container land on the host, viewable the same way as a local run.
+- Full 21-test suite run both in-container and on the host, same result: 21/21 passed in both,
+  same tests, same browsers. Container run took ~34.8s vs ~26.4s on the host — the gap is
+  normal containerization overhead, not a functional difference.
+
+```
+$ docker run --rm -e TEST_ENV=hosted \
+    -v "$(pwd)/test-results:/app/test-results" \
+    -v "$(pwd)/playwright-report:/app/playwright-report" \
+    -v "$(pwd)/allure-results:/app/allure-results" \
+    rbp-e2e-tests pnpm test
+Running 21 tests using 8 workers
+...
+  21 passed (34.8s)
+```
+
+Day 3 (pending go-ahead): documentation/buffer — finalize the Docker run instructions here.

@@ -1069,3 +1069,77 @@ docker run --rm -e TEST_ENV=hosted rbp-e2e-tests:latest \
 Day 1 complete: image builds cleanly, smoke test passes in-container against the real hosted
 instance. Day 2 (full suite in-container + host parity check) is a separate go-ahead per the
 new day-chunk pacing.
+
+### Day 2 — full suite in-container, parity with a local run
+
+#### 1. Rebuild fresh
+
+```bash
+docker build -t rbp-e2e-tests:latest .
+```
+
+Almost entirely layer-cached from Day 1 (only `COPY . .` re-ran, since no source changed) —
+confirms the Dockerfile's layer ordering (deps installed before the rest of the source is
+copied) is doing its job of keeping rebuilds fast.
+
+#### 2. Mount report directories so artifacts land on the host
+
+Reports only exist inside the container's filesystem by default and disappear with `--rm`
+unless mounted out:
+
+```bash
+rm -rf test-results playwright-report allure-results allure-report
+mkdir -p test-results playwright-report allure-results
+
+docker run --rm -e TEST_ENV=hosted \
+  -v "D:\Work\projects\E2E\playwright-typescript\test-results:/app/test-results" \
+  -v "D:\Work\projects\E2E\playwright-typescript\playwright-report:/app/playwright-report" \
+  -v "D:\Work\projects\E2E\playwright-typescript\allure-results:/app/allure-results" \
+  rbp-e2e-tests:latest pnpm test
+```
+
+```
+Running 21 tests using 8 workers
+...
+  21 passed (34.8s)
+```
+
+Confirmed the mounts actually worked, not just that the run passed:
+
+```bash
+ls playwright-report/        # index.html
+ls allure-results/ | wc -l   # 21 — one raw result per test
+```
+
+#### 3. Host parity run
+
+```bash
+rm -rf test-results playwright-report allure-results allure-report
+pnpm run test:hosted
+```
+
+```
+Running 21 tests using 8 workers
+...
+  21 passed (26.4s)
+```
+
+Same 21 tests, same 3 browsers, same result, both places. The container run took longer
+(~34.8s vs ~26.4s) — expected containerization overhead (extra virtualization layer under
+WSL2), not a functional gap. No env var/secrets handling issues to resolve here — `-e
+TEST_ENV=hosted` was already sufficient (proven in Day 1), and the admin-authenticated tests
+(`admin-rooms.spec.ts`, the API bookings/messages contract tests) all passed using the
+zod-defaulted `admin`/`password` credentials with no `.env` file present in the image at all,
+confirming `config/env.ts`'s defaults work correctly with no environment configuration
+whatsoever beyond the one `-e` flag.
+
+#### 4. Proof
+
+```bash
+pnpm run typecheck   # clean
+pnpm run lint        # clean
+```
+
+Phase 7 Day 2 complete: full suite runs identically in-container and on the host, and reports
+generated inside the container are accessible on the host via volume mounts. Day 3 (docs/buffer)
+is a separate go-ahead.

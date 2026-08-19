@@ -1164,3 +1164,64 @@ still pass.
 Phase 7 complete: image builds cleanly, pinned to the exact installed Playwright version;
 smoke test and full suite both verified in-container with results matching a host run;
 reports accessible on the host via volume mounts; `.dockerignore` finalized.
+
+---
+
+## Phase 8 — GitHub Actions PR Checks
+
+### Day 1 — base workflow: lint + typecheck
+
+#### 1. Write the workflow
+
+`.github/workflows/pr-checks.yml` — two jobs, `lint` and `typecheck`, each: checkout →
+`pnpm/action-setup` (no `version` input, so it reads `packageManager` from `package.json`
+automatically) → `actions/setup-node@v4` with `node-version: '24'` and `cache: 'pnpm'` →
+`pnpm install --frozen-lockfile` → the job's own command. Triggers: `pull_request` targeting
+`main`, plus `workflow_dispatch` for manual runs. `permissions: contents: read` (least
+privilege — this workflow only reads, never writes). A `concurrency` group cancels a still-
+running check when a new commit lands on the same PR, instead of wasting CI minutes on a
+now-outdated run.
+
+Order matters for the pnpm/Node setup steps: `pnpm/action-setup` must run _before_
+`actions/setup-node`, because `setup-node`'s `cache: 'pnpm'` option needs `pnpm` already on
+`PATH` to know what to cache.
+
+#### 2. Prove it on a real PR, not just by reading the YAML
+
+A GitHub Actions workflow "should work" based on reading it is not proof — the only real proof
+is a run actually executing on GitHub. Rather than push straight to `main` (where a
+`pull_request`-triggered workflow wouldn't even fire), created a branch specifically to
+exercise it:
+
+```bash
+git checkout -b ci/pr-checks-workflow
+git add .github/workflows/pr-checks.yml
+git commit -F <message file>
+git push -u origin ci/pr-checks-workflow
+gh pr create --title "Add PR checks workflow" --base main --head ci/pr-checks-workflow
+gh pr checks 1 --watch
+```
+
+```
+lint        pass    18s
+typecheck   pass    20s
+```
+
+Both jobs ran for real on GitHub Actions and passed. Squash-merged the PR
+(`gh pr merge 1 --squash --delete-branch`), which fast-forwarded local `main` and cleaned up
+the branch automatically.
+
+This is the first PR-based change in this project — every prior phase committed straight to
+`main`. The PR cycle here was specifically to get a real trigger for a `pull_request`-scoped
+workflow to verify against; doc-only changes continue to commit directly to `main` as before,
+not every future change needs to go through a PR.
+
+#### 3. Proof
+
+```bash
+pnpm run typecheck   # clean
+pnpm run lint        # clean
+```
+
+Phase 8 Day 1 complete: lint and typecheck run as real, passing GitHub Actions checks on a
+live pull request. Day 2 (smoke-test subset, sharded across browsers) is a separate go-ahead.

@@ -414,6 +414,25 @@ $ docker run --rm -e TEST_ENV=hosted rbp-e2e-tests pnpm test
   20 passed (27.3s)
 ```
 
-Next up (Phase 8, pending go-ahead): GitHub Actions PR checks — lint, typecheck, and a sharded
-smoke-test subset gating every pull request. Needs your branch protection expectations before
-its final day (required status check + rule application).
+### Phase 8 — GitHub Actions PR Checks (in progress)
+
+**Day 1 — base workflow (lint + typecheck):**
+
+- `.github/workflows/pr-checks.yml` — two parallel jobs (`lint`, `typecheck`), triggered on
+  every pull request targeting `main` plus manual `workflow_dispatch`. `pnpm/action-setup` runs
+  with no pinned version so it picks up the `packageManager` field from `package.json`, and
+  `pnpm install --frozen-lockfile` keeps CI installs reproducible.
+- Verified with a real PR, not just by reading the YAML: opened
+  [PR #1](https://github.com/ramanwaliagithub/playwright-typescript-e2e/pull/1) carrying just
+  this workflow file, watched both jobs actually run on GitHub Actions, confirmed both passed,
+  then squash-merged.
+
+```
+$ gh pr checks 1 --watch
+lint        pass    18s
+typecheck   pass    20s
+```
+
+Day 2 (pending go-ahead): smoke-test subset running in CI against the hosted instance, sharded
+across the 3 browser projects. Day 3 (pending go-ahead, and pending your branch protection
+expectations): artifact upload on failure, required status check, branch protection rule.

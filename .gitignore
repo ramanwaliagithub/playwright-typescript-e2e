@@ -38,3 +38,6 @@ pnpm-debug.log*
 
 # Personal step-by-step run manual — not shared, local reference only
 E2E_manual.md
+
+# Personal Claude Code project instructions — not shared, local reference only
+CLAUDE.md

@@ -433,6 +433,25 @@ lint        pass    18s
 typecheck   pass    20s
 ```
 
-Day 2 (pending go-ahead): smoke-test subset running in CI against the hosted instance, sharded
-across the 3 browser projects. Day 3 (pending go-ahead, and pending your branch protection
-expectations): artifact upload on failure, required status check, branch protection rule.
+**Day 2 — sharded smoke-test matrix:**
+
+- Added a `smoke` job to the same workflow, matrixed across `chromium`/`firefox`/`webkit`
+  (`fail-fast: false`, so one browser's failure doesn't cancel the others). Each shard installs
+  only its own browser (`playwright install --with-deps ${{ matrix.browser }}`) and runs just
+  `tests/smoke.spec.ts` — fast PR feedback, not the full 21-test suite (that's reserved for
+  scheduled regression in Phase 10).
+- Verified the same way as Day 1 — a real PR
+  ([#2](https://github.com/ramanwaliagithub/playwright-typescript-e2e/pull/2)), all 5 checks
+  watched to completion, then squash-merged.
+
+```
+$ gh pr checks 2 --watch
+lint                pass   19s
+typecheck           pass   12s
+smoke (chromium)    pass   44s
+smoke (firefox)     pass   47s
+smoke (webkit)      pass   1m3s
+```
+
+Day 3 (pending go-ahead, and pending your branch protection expectations): artifact upload on
+failure, required status check, branch protection rule.

@@ -1225,3 +1225,70 @@ pnpm run lint        # clean
 
 Phase 8 Day 1 complete: lint and typecheck run as real, passing GitHub Actions checks on a
 live pull request. Day 2 (smoke-test subset, sharded across browsers) is a separate go-ahead.
+
+### Day 2 — sharded smoke-test matrix
+
+#### 1. Add the matrixed job
+
+Added a `smoke` job to `.github/workflows/pr-checks.yml`:
+
+```yaml
+smoke:
+  runs-on: ubuntu-latest
+  strategy:
+    fail-fast: false
+    matrix:
+      browser: [chromium, firefox, webkit]
+  steps:
+    - uses: actions/checkout@v4
+    - uses: pnpm/action-setup@v4
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '24'
+        cache: 'pnpm'
+    - run: pnpm install --frozen-lockfile
+    - run: pnpm exec playwright install --with-deps ${{ matrix.browser }}
+    - run: pnpm exec playwright test tests/smoke.spec.ts --project=${{ matrix.browser }}
+      env:
+        TEST_ENV: hosted
+```
+
+Deliberately scoped to just `tests/smoke.spec.ts`, not the full suite — PR checks should give
+fast feedback; the full 21-test regression run is Phase 10's scheduled-job territory, not
+something every PR should wait on. `fail-fast: false` so a failure on one browser doesn't
+cancel the other two shards mid-run — useful for actually seeing which browser(s) are affected
+instead of just "something failed."
+
+No secrets/env configuration needed: `config/env.ts`'s zod defaults (`TEST_ENV=hosted`,
+`ADMIN_USERNAME`/`ADMIN_PASSWORD` defaulting to RBP's shipped `admin`/`password`) are enough
+for the smoke test, which doesn't touch admin-gated functionality anyway.
+
+#### 2. Verify via a real PR again
+
+Same pattern as Day 1 — asked for and got go-ahead on the full branch → commit → push → PR →
+watch → merge sequence before running any of it (per the "ask before commit/push" instruction
+now in `CLAUDE.md`):
+
+```bash
+git checkout -b ci/sharded-smoke-matrix
+git add .github/workflows/pr-checks.yml
+git commit -F <scratchfile>
+git push -u origin ci/sharded-smoke-matrix
+gh pr create --title "Add sharded smoke-test matrix to PR checks" --base main --head ci/sharded-smoke-matrix
+gh pr checks 2 --watch
+```
+
+```
+lint                pass   19s
+typecheck           pass   12s
+smoke (chromium)    pass   44s
+smoke (firefox)     pass   47s
+smoke (webkit)      pass   1m3s
+```
+
+All 5 checks (the 2 from Day 1 plus the 3 new matrix shards) passed on a real GitHub Actions
+run. `gh pr merge 2 --squash --delete-branch` fast-forwarded local `main` automatically.
+
+Phase 8 Day 2 complete: PR checks now cover all 3 browsers via a fast, sharded smoke-test
+matrix. Day 3 (artifact upload, required status check, branch protection) is a separate
+go-ahead, and still needs the user's branch protection expectations first.

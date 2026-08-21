@@ -55,3 +55,9 @@ jobs:
       - run: pnpm exec playwright test tests/smoke.spec.ts --project=${{ matrix.browser }}
         env:
           TEST_ENV: hosted
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report-${{ matrix.browser }}
+          path: playwright-report/
+          retention-days: 7

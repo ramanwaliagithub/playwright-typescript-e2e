@@ -1292,3 +1292,99 @@ run. `gh pr merge 2 --squash --delete-branch` fast-forwarded local `main` automa
 Phase 8 Day 2 complete: PR checks now cover all 3 browsers via a fast, sharded smoke-test
 matrix. Day 3 (artifact upload, required status check, branch protection) is a separate
 go-ahead, and still needs the user's branch protection expectations first.
+
+### Day 3 — artifact upload on failure
+
+#### 1. Scope check: branch protection is still an open question
+
+Day 3's full scope (per the roadmap) is artifact upload + required status check + branch
+protection rule. The last two need the user's branch protection expectations, unanswered since
+kickoff. Flagged a real tradeoff before asking again: our PR-checks workflow only triggers on
+`pull_request` events, so if branch protection _requires_ those checks to pass, it also has to
+_require a PR before merging_ — a direct push to `main` would never trigger them, and would
+just sit blocked waiting on checks that never ran. That's a bigger process change than "turn on
+a setting" — it would end the direct-to-`main` pattern used for every phase so far except CI-
+workflow verification. User said to continue rather than block on it, so proceeded with just
+the unblocked artifact-upload piece.
+
+#### 2. Add the upload step
+
+```yaml
+- run: pnpm exec playwright test tests/smoke.spec.ts --project=${{ matrix.browser }}
+  env:
+    TEST_ENV: hosted
+- uses: actions/upload-artifact@v4
+  if: failure()
+  with:
+    name: playwright-report-${{ matrix.browser }}
+    path: playwright-report/
+    retention-days: 7
+```
+
+Per-browser artifact names (`playwright-report-chromium` etc.) — required, since all 3 matrix
+shards would otherwise try to upload an artifact named the same thing in the same run, which
+GitHub Actions doesn't allow. No extra `permissions` needed — `actions/upload-artifact` works
+under the existing `contents: read`.
+
+#### 3. Prove it fires on a real failure, not just read the YAML
+
+`if: failure()` looks right on paper, but the only real proof is watching it actually trigger.
+Rather than trust that, deliberately broke the smoke test on the verification branch:
+
+```bash
+git checkout -b ci/artifact-upload-on-failure
+git add .github/workflows/pr-checks.yml
+git commit -F <scratchfile>              # the real change
+# then, same branch, second commit:
+#   tests/smoke.spec.ts: assert an impossible title
+git add tests/smoke.spec.ts
+git commit -m "temp: break smoke test to verify artifact upload on failure"
+git push -u origin ci/artifact-upload-on-failure
+gh pr create --title "Upload Playwright report on smoke-test failure" --base main --head ci/artifact-upload-on-failure
+gh pr checks 3 --watch
+```
+
+All 3 `smoke` shards failed, as intended. Checked for the artifacts directly via the API
+rather than trusting the Actions UI summary:
+
+```bash
+gh api repos/ramanwaliagithub/playwright-typescript-e2e/actions/runs/<id>/artifacts
+```
+
+```json
+{
+  "total_count": 3,
+  "artifacts": [
+    { "name": "playwright-report-chromium", "size_in_bytes": 8168346 },
+    { "name": "playwright-report-webkit", "size_in_bytes": 14336275 },
+    { "name": "playwright-report-firefox", "size_in_bytes": 13510958 }
+  ]
+}
+```
+
+All 3 present, non-trivial sizes (real HTML reports, not empty stubs).
+
+#### 4. Clean up and merge
+
+```bash
+git revert --no-edit <temp-breakage-sha>
+git push
+gh pr checks 3 --watch   # all 5 green now
+gh pr merge 3 --squash --delete-branch
+```
+
+Squash-merging collapsed the temporary breakage + its revert into a clean 6-line diff in
+`main` — the intermediate broken state never persists in the permanent history, only in the
+now-closed PR's own commit log.
+
+#### 5. Proof
+
+```bash
+pnpm run typecheck   # clean
+pnpm run lint        # clean
+git log --oneline -1
+# 6b95b1a feat: upload the Playwright report on smoke-test failure
+```
+
+Phase 8 Day 3 (artifact upload) complete. Required status check + branch protection rule
+remain blocked on the user's branch protection expectations.

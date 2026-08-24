@@ -453,7 +453,7 @@ smoke (firefox)     pass   47s
 smoke (webkit)      pass   1m3s
 ```
 
-**Day 3 — artifact upload on failure (in progress):**
+**Day 3 — artifact upload, required status checks, branch protection:**
 
 - The `smoke` job now uploads `playwright-report/` as a per-browser artifact
   (`playwright-report-chromium`/`-firefox`/`-webkit`, 7-day retention) whenever it fails —
@@ -472,5 +472,30 @@ playwright-report-webkit    14.3MB
 playwright-report-firefox   13.5MB
 ```
 
-Required status check + branch protection rule application is still pending your branch
-protection expectations (open since kickoff).
+- **Branch protection on `main`** — user delegated the policy call. Configured via the GitHub
+  API (`PUT .../branches/main/protection`): all 5 checks (`lint`, `typecheck`, `smoke
+(chromium)`, `smoke (firefox)`, `smoke (webkit)`) required and must be up to date
+  (`strict: true`); no required review count (a solo repo can't self-approve, so this would've
+  been a deadlock); admins **not** enforced, so the repo owner keeps a bypass valve while the
+  gate is real for anyone else; force-push and branch deletion disallowed on `main`.
+- Verified for real: a trivial direct push to `main` was evaluated against the rule and
+  reported `5 of 5 required status checks are expected` — genuinely blocked for a non-admin —
+  but went through because the pusher is the repo admin and `enforce_admins` is off, exactly as
+  configured. Cleaned up immediately with a revert.
+
+```
+$ git push
+remote: Bypassed rule violations for refs/heads/main:
+remote: - 5 of 5 required status checks are expected.
+```
+
+Since the checks only trigger on `pull_request`, this makes PRs the standard path for anything
+that needs to be enforced going forward — direct-to-`main` commits remain technically possible
+for the repo owner but are no longer the "protected" path.
+
+Phase 8 complete.
+
+Next up (Phase 9, pending go-ahead): Terraform for AWS scheduled-run infrastructure — remote
+state backend, IAM role, CodeBuild project, S3 report bucket, EventBridge nightly schedule.
+`terraform plan` output for review before any `apply` — always needs explicit go-ahead, it's
+cost-incurring.

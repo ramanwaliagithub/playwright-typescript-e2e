@@ -1,7 +1,5 @@
 # playwright-typescript-e2e
 
-<!-- branch-protection-test: temporary, verifies direct push to main is blocked -->
-
 Enterprise UI + API test automation framework (TypeScript + Playwright) for
 [Restful-Booker-Platform](https://github.com/mwinteringham/restful-booker-platform) (RBP).
 

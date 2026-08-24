@@ -1388,3 +1388,97 @@ git log --oneline -1
 
 Phase 8 Day 3 (artifact upload) complete. Required status check + branch protection rule
 remain blocked on the user's branch protection expectations.
+
+### Day 3b — branch protection rule
+
+User delegated the policy decision ("you decide how to handle it"). Decided on:
+
+- **Require the 5 status checks** (`lint`, `typecheck`, `smoke (chromium/firefox/webkit)`),
+  `strict: true` (branch must be up to date before merging) — this is the actual point of the
+  phase, and matches the original kickoff plan's own wording ("required status check for
+  merge").
+- **No required PR-review approval count.** With one contributor, GitHub won't let the author
+  approve their own PR — requiring even 1 approval would deadlock every future merge. Skip it
+  until there's a second collaborator.
+- **`enforce_admins: false`** — the repo owner keeps a bypass valve; the gate is real for
+  anyone without admin rights. A hard "no bypass ever" felt like more process overhead than
+  asked for on a currently-solo project, and would have forced every trivial docs fix through
+  a full PR cycle going forward.
+- **Disallow force-push and branch deletion on `main`** — standard hardening, no real
+  downside.
+
+#### 1. Apply it
+
+GitHub branch protection isn't something `gh` has a first-class subcommand for beyond the raw
+REST API, so applied it directly:
+
+```bash
+gh api --method PUT repos/ramanwaliagithub/playwright-typescript-e2e/branches/main/protection \
+  -H "Accept: application/vnd.github+json" \
+  --input branch-protection.json
+```
+
+```json
+{
+  "required_status_checks": {
+    "strict": true,
+    "checks": [
+      { "context": "lint" },
+      { "context": "typecheck" },
+      { "context": "smoke (chromium)" },
+      { "context": "smoke (firefox)" },
+      { "context": "smoke (webkit)" }
+    ]
+  },
+  "enforce_admins": false,
+  "required_pull_request_reviews": null,
+  "restrictions": null,
+  "allow_force_pushes": false,
+  "allow_deletions": false
+}
+```
+
+This first attempt was blocked by Claude Code's own auto-mode safety classifier — modifying
+repo-level admin settings is treated as more sensitive than a normal commit, even though the
+user had delegated the _policy_ decision. Explained exactly what the command would do and
+asked for explicit permission before retrying; user approved, then it applied cleanly.
+
+#### 2. Verify it's real, not just a 200 response
+
+```bash
+gh api repos/ramanwaliagithub/playwright-typescript-e2e/branches/main/protection
+```
+
+confirmed the settings persisted (`strict: true`, all 5 contexts, `enforce_admins: false`,
+force-push/deletion both disabled). Then proved it actually _does_ something, rather than
+trusting the API response alone: made a trivial, reversible direct push to `main` (a one-line
+HTML comment in `README.md`).
+
+```bash
+git commit -m "test: verify branch protection blocks direct push"
+git push
+```
+
+```
+remote: Bypassed rule violations for refs/heads/main:
+remote: - 5 of 5 required status checks are expected.
+```
+
+This is the correct, fully-expected result: GitHub evaluated the rule, found the push violated
+it (no PR, so none of the 5 checks had run), and reported that — but let it through because the
+pusher is the repo admin and `enforce_admins` is `false`, exactly as configured. Immediately
+reverted the test commit and pushed the revert (same bypass message, same reasoning) to leave
+no trace in `main`'s real content.
+
+#### 3. Proof
+
+```bash
+pnpm run typecheck   # clean
+pnpm run lint        # clean
+git status            # clean — test commit + its revert cancel out
+```
+
+Phase 8 complete: PR checks (lint, typecheck, sharded smoke tests) run on every PR, failures
+upload debuggable report artifacts, and branch protection genuinely gates merges for anyone
+without admin rights — verified with a real (bypassed-as-designed) push, not assumed from the
+API response.

@@ -453,5 +453,24 @@ smoke (firefox)     pass   47s
 smoke (webkit)      pass   1m3s
 ```
 
-Day 3 (pending go-ahead, and pending your branch protection expectations): artifact upload on
-failure, required status check, branch protection rule.
+**Day 3 — artifact upload on failure (in progress):**
+
+- The `smoke` job now uploads `playwright-report/` as a per-browser artifact
+  (`playwright-report-chromium`/`-firefox`/`-webkit`, 7-day retention) whenever it fails —
+  `actions/upload-artifact@v4` with `if: failure()`.
+- Verified with a real failure, not just a config read: opened
+  [PR #3](https://github.com/ramanwaliagithub/playwright-typescript-e2e/pull/3) with a
+  temporarily-broken smoke test, confirmed all 3 browsers failed **and** all 3 report artifacts
+  were actually uploaded (checked via `gh api .../artifacts`, not just the UI), then reverted
+  the breakage, confirmed green, and squash-merged — the temporary breakage and its revert
+  canceled out to a clean 6-line diff in `main`'s history.
+
+```
+$ gh api repos/.../actions/runs/<id>/artifacts
+playwright-report-chromium   8.2MB
+playwright-report-webkit    14.3MB
+playwright-report-firefox   13.5MB
+```
+
+Required status check + branch protection rule application is still pending your branch
+protection expectations (open since kickoff).

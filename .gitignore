@@ -21,8 +21,10 @@ allure-report/
 infra/**/.terraform/
 infra/**/*.tfstate
 infra/**/*.tfstate.*
-infra/**/.terraform.lock.hcl
 infra/**/crash.log
+infra/**/*.tfplan
+# .terraform.lock.hcl is deliberately NOT ignored — like pnpm-lock.yaml, it pins exact
+# provider versions and should be committed for reproducible plans/applies.
 
 # OS / editor
 .DS_Store

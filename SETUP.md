@@ -29,7 +29,7 @@ Fell back to a global npm install instead:
 
 ```bash
 npm install -g pnpm
-pnpm -v   # 11.20.0
+pnpm -v   # 11.20.0, change to higher
 ```
 
 ### 2. Initialize the project

@@ -29,7 +29,7 @@ Per-environment settings (base URL, retry count, action/navigation timeouts) liv
 
 ```bash
 pnpm install
-pnpm exec playwright install --with-deps chromium firefox webkit
+pnpm exec playwright install --with-deps chromium firefox webkit # Can keep chromium only
 cp .env.example .env   # defaults already point at the hosted RBP instance
 ```
 

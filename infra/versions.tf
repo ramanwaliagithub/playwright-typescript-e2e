@@ -12,14 +12,14 @@ terraform {
   # can't reference variables or other resources' outputs, so these are hardcoded here once
   # bootstrap has been applied. See SETUP.md for the exact values used and when.
   backend "s3" {
-    bucket         = "REPLACE_WITH_BOOTSTRAP_OUTPUT_state_bucket_name"
+    bucket         = "rbp-e2e-tfstate-f852008a"
     key            = "rbp-e2e/terraform.tfstate"
-    region         = "us-east-1"
+    region         = "ap-southeast-2"
     dynamodb_table = "rbp-e2e-tfstate-lock"
     encrypt        = true
   }
 }
 
 provider "aws" {
-  region = "us-east-1"
+  region = "ap-southeast-2"
 }

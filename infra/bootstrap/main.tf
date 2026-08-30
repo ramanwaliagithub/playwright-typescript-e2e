@@ -11,6 +11,11 @@ resource "random_id" "state_bucket_suffix" {
 resource "aws_s3_bucket" "terraform_state" {
   bucket = "${var.project}-tfstate-${random_id.state_bucket_suffix.hex}"
 
+  # This bucket only ever holds Terraform state, never arbitrary data, so force_destroy is
+  # safe here and lets `terraform destroy` clean up a non-empty (versioned) bucket without a
+  # separate manual emptying step — deliberately a disposable/rebuildable bootstrap stack.
+  force_destroy = true
+
   tags = {
     Project   = var.project
     ManagedBy = "terraform"

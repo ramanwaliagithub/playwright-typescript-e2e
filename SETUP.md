@@ -5,12 +5,30 @@ directory, and why. This file is updated after every phase — it is the source 
 "how do I get this environment working from scratch," separate from `README.md` (which
 documents what the framework does and how to run tests day-to-day).
 
-Environment this was built against: Windows 11, Node v24.18.0, Docker 29.6.2, Docker Compose
-v5.3.0, git 2.54.0.
+Environment this was originally built against (Phase 1 snapshot, kept as historical record —
+see "Cumulative tooling requirements" below for the current full list): Windows 11, Node
+v24.18.0, Docker 29.6.2, Docker Compose v5.3.0, git 2.54.0.
+
+## Cumulative tooling requirements
+
+Everything needed to work through every phase so far, updated as later phases add tools. Not
+all of these are needed to just _run the tests_ day-to-day — see `README.md`'s Requirements
+section for that narrower list.
+
+| Tool                                   | Needed for                                                                     | Install                                                                                                |
+| -------------------------------------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------ |
+| Node v24.x                             | Everything                                                                     | [nodejs.org](https://nodejs.org/) or a version manager                                                 |
+| pnpm                                   | Everything                                                                     | `npm install -g pnpm` (see Phase 1 step 1 for why not Corepack on this machine)                        |
+| Docker Desktop                         | Phase 7 (Dockerize), Phase 1's abandoned local RBP attempt                     | [docker.com](https://www.docker.com/products/docker-desktop/)                                          |
+| `git` + a GitHub account with `gh` CLI | Everything (repo), Phase 8+ (PR-based CI verification, branch protection)      | `gh` via [cli.github.com](https://cli.github.com/), then `gh auth login`                               |
+| Terraform CLI (`terraform`)            | Phase 9+ (AWS infrastructure)                                                  | [developer.hashicorp.com/terraform/install](https://developer.hashicorp.com/terraform/install)         |
+| AWS CLI v2 (`aws`)                     | Phase 9+ (AWS infrastructure)                                                  | [AWS CLI install guide](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) |
+| AWS credentials (`aws configure`)      | Phase 9+ (anything that calls AWS)                                             | See Phase 9 Day 1, step 1/3 below                                                                      |
+| JDK 26 + Maven                         | Only if reviving local RBP (currently abandoned, hosted instance used instead) | Phase 1 steps 9-10 below                                                                               |
 
 ---
 
-## Phase 1 — Project Scaffolding (in progress)
+## Phase 1 — Project Scaffolding
 
 ### 1. Package manager: install pnpm
 
@@ -1500,11 +1518,25 @@ aws sts get-caller-identity
 
 Asked the user how they wanted to handle AWS credentials rather than guessing — offered
 `aws configure` (self-service, keeps secrets out of chat), `aws sso login`, pre-set env vars,
-or deferring entirely. User chose to run `aws configure` themselves. While waiting, wrote and
-validated everything that doesn't need live AWS access: the bootstrap module's `.tf` files,
-`terraform fmt`, `terraform init` (downloads provider plugins from the public registry, no AWS
-call), and `terraform validate` (pure config-consistency check, no AWS call) — all passed clean
-before a single AWS credential existed.
+or deferring entirely. User chose to run `aws configure` themselves, in their own terminal, not
+this one — never pasted into chat:
+
+```bash
+aws configure
+# prompts for: AWS Access Key ID, AWS Secret Access Key, Default region name, Default output format
+```
+
+or, for SSO-based accounts instead of long-lived access keys:
+
+```bash
+aws configure sso
+aws sso login --profile <profile-name>   # re-run whenever the SSO session expires
+```
+
+While waiting, wrote and validated everything that doesn't need live AWS access: the bootstrap
+module's `.tf` files, `terraform fmt`, `terraform init` (downloads provider plugins from the
+public registry, no AWS call), and `terraform validate` (pure config-consistency check, no AWS
+call) — all passed clean before a single AWS credential existed.
 
 #### 2. Existing IAM user vs. a dedicated one
 

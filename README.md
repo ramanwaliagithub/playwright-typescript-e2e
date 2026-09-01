@@ -21,9 +21,24 @@ Per-environment settings (base URL, retry count, action/navigation timeouts) liv
 
 ## Requirements
 
+To run the test suite:
+
 - Node v24.x (Active LTS) — `engines.node` in `package.json` enforces `>=24.0.0 <25.0.0`
 - [pnpm](https://pnpm.io/) — install with `npm install -g pnpm` if you don't have it
 - Chromium, Firefox, and WebKit are installed via Playwright itself (see below), not the OS
+
+Only if you're touching the corresponding phase's work:
+
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) — for building/running the
+  suite in a container (see "Running in Docker" below)
+- [Terraform](https://developer.hashicorp.com/terraform/install) + [AWS CLI
+  v2](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) + AWS
+  credentials (`aws configure`) — for the Terraform infrastructure in `infra/` (see
+  "Infrastructure (AWS/Terraform)" below)
+- [GitHub CLI](https://cli.github.com/) (`gh`, authenticated via `gh auth login`) — for
+  verifying `pull_request`-triggered CI workflows or branch protection changes
+
+See `SETUP.md`'s "Cumulative tooling requirements" table for the full list with install links.
 
 ## Setup
 
@@ -176,6 +191,34 @@ package version exactly, or tests fail to launch. Pass any env var the framework
 `.env.example`) via `-e`; there's no `.env` inside the image (`.dockerignore` excludes it), so
 secrets are never baked into a layer. Verified (Phase 7 Day 2) that a full run in-container
 produces identical results to a local host run.
+
+## Infrastructure (AWS/Terraform)
+
+`infra/` holds the Terraform for scheduled-regression infrastructure (Phase 9). Two roots:
+
+- `infra/bootstrap/` — the S3 bucket + DynamoDB table that hold this project's own Terraform
+  remote state. Uses local state itself (the remote backend can't exist before it's created).
+- `infra/` (root) — the main infrastructure (CodeBuild, IAM, EventBridge — landing in Phase 9
+  Day 2/3), configured to store its state in the bucket `infra/bootstrap/` creates.
+
+**Current status: the state backend mechanism was built, applied against real AWS, verified
+working, and then deliberately torn down** — proof-of-concept, not a standing resource, so
+there's no ongoing AWS cost from this phase yet. `infra/versions.tf`'s backend block currently
+has a placeholder bucket name. See `SETUP.md`'s Phase 9 section for the full apply → verify →
+destroy record, and `E2E_manual.md`'s Phase 9 "Redo guide" for the exact steps to stand it back
+up for real.
+
+```bash
+export AWS_PROFILE=<your-profile>   # or however your credentials are configured
+cd infra/bootstrap
+terraform init && terraform plan -out=bootstrap.tfplan   # review the plan
+terraform apply "bootstrap.tfplan"                       # needs explicit go-ahead — cost-incurring
+# copy state_bucket_name from the output into infra/versions.tf's backend block, then:
+cd .. && terraform init
+```
+
+`terraform apply`/`destroy` always need explicit go-ahead before running — every AWS resource
+here has a real (if small) cost.
 
 ## Reporting & Diagnostics
 

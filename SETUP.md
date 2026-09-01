@@ -1482,3 +1482,175 @@ Phase 8 complete: PR checks (lint, typecheck, sharded smoke tests) run on every 
 upload debuggable report artifacts, and branch protection genuinely gates merges for anyone
 without admin rights — verified with a real (bypassed-as-designed) push, not assumed from the
 API response.
+
+---
+
+## Phase 9 — Terraform: AWS Scheduled-Run Infrastructure
+
+### Day 1 — remote state backend
+
+#### 1. Check tooling and AWS access before writing anything
+
+```bash
+terraform -version   # v1.15.8, already installed
+aws --version        # aws-cli/2.36.10, already installed
+aws sts get-caller-identity
+# NoCredentials — nothing configured yet
+```
+
+Asked the user how they wanted to handle AWS credentials rather than guessing — offered
+`aws configure` (self-service, keeps secrets out of chat), `aws sso login`, pre-set env vars,
+or deferring entirely. User chose to run `aws configure` themselves. While waiting, wrote and
+validated everything that doesn't need live AWS access: the bootstrap module's `.tf` files,
+`terraform fmt`, `terraform init` (downloads provider plugins from the public registry, no AWS
+call), and `terraform validate` (pure config-consistency check, no AWS call) — all passed clean
+before a single AWS credential existed.
+
+#### 2. Existing IAM user vs. a dedicated one
+
+User asked whether to reuse their one existing IAM user or create a new one. Real chicken-and-
+egg problem: creating a _new_ least-privilege user requires _some_ existing privileged access
+to create it with. Resolved as a staged plan: use the existing user to bootstrap, then (later in
+this phase) provision a dedicated `rbp-e2e-terraform` IAM user with a scoped policy via
+Terraform itself, and switch over to it for everything going forward — gets proper separation
+without a deadlock.
+
+#### 3. Credentials showed up under a named profile, not `default`
+
+```bash
+aws sts get-caller-identity
+# still NoCredentials
+```
+
+`aws configure` had in fact been run, but under a named profile:
+
+```bash
+cat ~/.aws/config
+# [profile terraform-cli]
+# region = ap-southeast-2
+aws sts get-caller-identity --profile terraform-cli
+# Account: 689971417924, Arn: .../user/terraform-cli
+```
+
+Every `terraform`/`aws` command in this phase needs `AWS_PROFILE=terraform-cli` exported first
+(the Bash tool doesn't persist env vars between calls in this environment, so it's set inline
+per command, not once globally). The default region in `infra/bootstrap/variables.tf` and
+`infra/versions.tf` was also updated from an initial `us-east-1` guess to `ap-southeast-2` to
+match.
+
+#### 4. Bootstrap module
+
+```
+infra/bootstrap/
+  versions.tf   — terraform + required_providers (aws ~> 5.0, random ~> 3.6)
+  variables.tf  — aws_region (default ap-southeast-2), project (default "rbp-e2e")
+  main.tf       — random_id suffix, S3 bucket (versioned, AES256, public access blocked,
+                  force_destroy = true), DynamoDB table (PAY_PER_REQUEST, hash key "LockID")
+  outputs.tf    — state_bucket_name, state_lock_table_name, aws_region
+```
+
+`force_destroy = true` on the bucket was added deliberately, not left as the (safer) default
+`false` — this bucket only ever holds Terraform state, never arbitrary data, and the plan for
+today was apply → verify → destroy in one sitting. A versioned bucket with an object in it
+(even just a state file) refuses to delete without `force_destroy`, so this was necessary to
+tear down cleanly without a separate manual "empty the bucket" step.
+
+Also caught and fixed a real bug in `.gitignore` while doing this: `.terraform.lock.hcl` was
+listed as ignored, which is backwards — like `pnpm-lock.yaml`, it pins exact provider versions
+and should be committed for reproducible plans. Fixed before it caused a problem (a teammate or
+CI resolving a different provider version than expected).
+
+#### 5. Plan, apply, and prove the backend actually works — not just trust the apply output
+
+```bash
+export AWS_PROFILE=terraform-cli
+cd infra/bootstrap
+terraform validate
+terraform plan -out=bootstrap.tfplan
+# Plan: 6 to add, 0 to change, 0 to destroy
+```
+
+Presented the full plan for review (per the standing "always ask before `apply`, it's cost-
+incurring" rule) before running it:
+
+```bash
+terraform apply "bootstrap.tfplan"
+# Apply complete! Resources: 6 added, 0 changed, 0 destroyed.
+# state_bucket_name = "rbp-e2e-tfstate-f852008a"
+```
+
+Wired the real bucket name into `infra/versions.tf`'s backend block (replacing the
+`REPLACE_WITH_BOOTSTRAP_OUTPUT_state_bucket_name` placeholder — backend blocks can't reference
+variables or other resources' outputs, so this hardcoding step is unavoidable and expected),
+then actually exercised it rather than assuming the config was correct:
+
+```bash
+cd infra
+terraform init
+# Successfully configured the backend "s3"!
+# (warning: `dynamodb_table` is deprecated in favor of `use_lockfile` — the newer AWS provider
+#  supports native S3 locking without a separate DynamoDB table. Left as DynamoDB for now since
+#  that's what the original phase plan explicitly asked for; noting the modernization option
+#  here rather than silently switching away from the spec.)
+terraform plan
+# Acquiring state lock. This may take a few moments...
+# No changes. (expected — infra/ has zero resources defined yet, Day 2/3's job)
+```
+
+The "Acquiring state lock" line is the real proof: it means Terraform actually reached out to
+DynamoDB and S3, not just parsed the config. Double-checked directly against AWS too, bypassing
+Terraform entirely:
+
+```bash
+aws s3api list-objects-v2 --bucket rbp-e2e-tfstate-f852008a   # empty — no resources to persist yet, expected
+aws dynamodb describe-table --table-name rbp-e2e-tfstate-lock --query "Table.TableStatus"
+# "ACTIVE"
+```
+
+#### 6. Deliberate teardown
+
+The whole point of today's exercise was to prove the mechanism works, not to keep it running
+indefinitely before Day 2/3 actually need it. Generated and reviewed a destroy plan before
+running it, same as any other apply:
+
+```bash
+terraform plan -destroy -out=destroy.tfplan
+# Plan: 0 to add, 0 to change, 6 to destroy
+terraform apply "destroy.tfplan"
+# Apply complete! Resources: 0 added, 0 changed, 6 destroyed.
+```
+
+Verified the resources are genuinely gone, directly against AWS, not just trusting Terraform's
+own "complete" message:
+
+```bash
+aws s3api head-bucket --bucket rbp-e2e-tfstate-f852008a
+# 404 Not Found
+aws dynamodb describe-table --table-name rbp-e2e-tfstate-lock
+# ResourceNotFoundException
+```
+
+Cleaned up local artifacts afterward: removed the now-stale `.tfplan` files and both `infra/`
+and `infra/bootstrap/`'s local `.terraform/` cache directories (gitignored, never committed —
+removed just so a future `terraform init` starts clean rather than pointing at cached state for
+a backend that no longer exists). `infra/bootstrap/terraform.tfstate` (bootstrap's own local
+state, since it doesn't use a remote backend itself) now correctly shows an empty `resources`
+list. Reverted `infra/versions.tf`'s backend bucket name back to the
+`REPLACE_WITH_BOOTSTRAP_OUTPUT_state_bucket_name` placeholder, with a comment pointing at this
+record and at `E2E_manual.md`'s redo steps — leaving the real (now-destroyed) bucket name live
+in the committed config would just be a dead reference, confusing for anyone (including
+future-me) who tries to use it without re-reading history first.
+
+#### 7. Proof
+
+```bash
+terraform fmt -recursive -diff   # clean, no changes needed
+pnpm run typecheck                # clean
+pnpm run lint                     # clean
+```
+
+Phase 9 Day 1 complete: the state backend mechanism (S3 + DynamoDB, provider/backend config) is
+proven to work end-to-end against real AWS — created, verified via both Terraform and the raw
+AWS API, then torn down the same way, with zero ongoing cost and a clean git history that
+doesn't leave a dead resource reference behind. Redo steps for when this needs to be stood up
+for real are in `E2E_manual.md`.

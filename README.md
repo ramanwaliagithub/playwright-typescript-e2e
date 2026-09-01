@@ -91,17 +91,17 @@ clutter. Here's what each one does and why it's here:
 
 ## Project structure
 
-| Folder      | Purpose                                                                          |
-| ----------- | -------------------------------------------------------------------------------- |
-| `tests/`    | Playwright test specs (`tests/api/` holds pure API contract tests)               |
-| `pages/`    | Page Object Model classes (Phase 3)                                              |
-| `fixtures/` | Playwright `test.extend` fixtures wiring pages/API client into tests (Phase 3-4) |
-| `utils/`    | Shared helpers (e.g. collision-safe random test data)                            |
-| `api/`      | API client wrapper + zod schemas / typed models (Phase 4)                        |
-| `config/`   | Zod-validated env loader, layered per-environment config, credentials (Phase 5)  |
-| `data/`     | Test data factories, built on `@faker-js/faker` (Phase 5)                        |
-| `ci/`       | GitHub Actions workflow support files (Phase 8)                                  |
-| `infra/`    | Terraform modules (Phase 9)                                                      |
+| Folder      | Purpose                                                                                     |
+| ----------- | ------------------------------------------------------------------------------------------- |
+| `tests/`    | Playwright test specs (`tests/api/` holds pure API contract tests)                          |
+| `pages/`    | Page Object Model classes (Phase 3)                                                         |
+| `fixtures/` | Playwright `test.extend` fixtures wiring pages/API client into tests (Phase 3-4)            |
+| `utils/`    | Shared helpers (e.g. collision-safe random test data)                                       |
+| `api/`      | API client wrapper + zod schemas / typed models (Phase 4)                                   |
+| `config/`   | Zod-validated env loader, layered per-environment config, credentials (Phase 5)             |
+| `data/`     | Test data factories, built on `@faker-js/faker` (Phase 5)                                   |
+| `ci/`       | GitHub Actions workflow support files (Phase 8)                                             |
+| `infra/`    | Terraform: `bootstrap/` (state backend) + main root for CodeBuild/IAM/EventBridge (Phase 9) |
 
 ## Page Object Model architecture
 
@@ -495,7 +495,38 @@ for the repo owner but are no longer the "protected" path.
 
 Phase 8 complete.
 
-Next up (Phase 9, pending go-ahead): Terraform for AWS scheduled-run infrastructure — remote
-state backend, IAM role, CodeBuild project, S3 report bucket, EventBridge nightly schedule.
-`terraform plan` output for review before any `apply` — always needs explicit go-ahead, it's
-cost-incurring.
+### Phase 9 — Terraform: AWS Scheduled-Run Infrastructure
+
+**Day 1 — remote state backend, proven then torn down:**
+
+- `infra/bootstrap/` — an S3 bucket (versioned, AES256-encrypted, all public access blocked,
+  `force_destroy = true` since it only ever holds Terraform state) and a DynamoDB table for
+  state locking. Uses local state itself, since the remote backend can't exist before it's
+  created.
+- `infra/versions.tf` — the main root's AWS provider + S3 backend config, for Phase 9's actual
+  resources (CodeBuild, IAM, EventBridge) to land in from Day 2 onward.
+- AWS access: a dedicated `terraform-cli` IAM user (account `689971417924`, region
+  `ap-southeast-2`) rather than a personal/admin identity — chosen over reusing an existing IAM
+  user for better separation, at the cost of needing that existing access once to bootstrap.
+- **Fully proven, then deliberately reverted** — this was a real `apply`, not a dry run: the
+  bucket and table were created, `infra/`'s backend was pointed at the real bucket and
+  `terraform init`/`plan` verified it actually works (state lock acquired via DynamoDB), then
+  both were destroyed with `terraform destroy` and confirmed gone via the AWS API directly
+  (`head-bucket` → 404, `describe-table` → `ResourceNotFoundException`) — no ongoing AWS cost
+  left running. `infra/versions.tf`'s backend bucket name is back to a placeholder as a result;
+  see `SETUP.md` for the full apply → verify → destroy record and `E2E_manual.md` for the exact
+  steps to redo this for real when ready to keep the infrastructure running.
+
+```
+$ terraform apply "bootstrap.tfplan"
+Apply complete! Resources: 6 added, 0 changed, 0 destroyed.
+
+$ terraform destroy ...
+Apply complete! Resources: 0 added, 0 changed, 6 destroyed.
+
+$ aws s3api head-bucket --bucket rbp-e2e-tfstate-f852008a
+404 Not Found
+```
+
+Day 2 (pending go-ahead): least-privilege IAM role, CodeBuild project, CloudWatch log group.
+`terraform plan`/`apply` always need explicit go-ahead — it's cost-incurring.

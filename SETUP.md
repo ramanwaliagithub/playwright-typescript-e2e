@@ -1686,3 +1686,41 @@ proven to work end-to-end against real AWS — created, verified via both Terraf
 AWS API, then torn down the same way, with zero ongoing cost and a clean git history that
 doesn't leave a dead resource reference behind. Redo steps for when this needs to be stood up
 for real are in `E2E_manual.md`.
+
+### Phase 9 Day 2 — CodeBuild execution role, project, log group
+
+Added the three resources Day 2 was scoped to, in `infra/` (the main root, currently unapplied
+since Day 1's state backend was deliberately torn down):
+
+1. **CloudWatch log group** (`infra/cloudwatch.tf`) — `/codebuild/rbp-e2e`, 30-day retention.
+   Written first since the IAM policy below needs its ARN.
+2. **IAM role** (`infra/iam.tf`) — a role CodeBuild assumes (`sts:AssumeRole` trust policy
+   scoped to the `codebuild.amazonaws.com` service principal), with an inline policy granting
+   only `logs:CreateLogGroup`, `logs:CreateLogStream`, `logs:PutLogEvents` on that one log
+   group's ARN — no wildcard resource access.
+3. **CodeBuild project** (`infra/codebuild.tf`) — `rbp-e2e-regression`, GitHub source pointed at
+   this repo, `buildspec` path set to `buildspec.yml` (doesn't exist in the repo yet — CodeBuild
+   only reads that file when a build actually runs, not at `terraform apply` time; the file
+   itself lands later in this phase when the scheduled regression suite is wired up).
+   `NO_ARTIFACTS` for now since the S3 report bucket is Day 3's job. Also added a
+   `github_token` variable (`sensitive = true`, `default = null`) — CodeBuild's GitHub source
+   credential needs a personal access token, supplied at apply time via `TF_VAR_github_token`,
+   never committed; `aws_codebuild_source_credential` only gets created (`count` gate) once a
+   token is actually supplied.
+4. `infra/variables.tf` (shared `project` variable) and `infra/outputs.tf` (project name, role
+   ARN, log group name — for later phases to reference) round out the root module.
+
+```bash
+cd infra
+terraform init -backend=false -input=false   # no real backend yet — offline validation only
+terraform fmt -recursive -diff                # one alignment fix in codebuild.tf, applied
+terraform validate
+# Success! The configuration is valid.
+```
+
+Deliberately did **not** re-bootstrap the state backend or run a real `plan`/`apply` this day —
+Day 3 adds the S3 report bucket and EventBridge schedule to the same root, so the plan is to
+accumulate all of Phase 9's resources first and then do one comprehensive `terraform plan` for
+review, rather than a partial plan per day. Committed as three separate commits (log group → IAM
+role → CodeBuild project, in that dependency order so each one validates independently on its
+own), each pushed right after committing.

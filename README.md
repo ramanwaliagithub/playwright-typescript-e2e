@@ -571,5 +571,25 @@ $ aws s3api head-bucket --bucket rbp-e2e-tfstate-f852008a
 404 Not Found
 ```
 
-Day 2 (pending go-ahead): least-privilege IAM role, CodeBuild project, CloudWatch log group.
+**Day 2 — CodeBuild execution role, project, and log group (written, not yet applied):**
+
+- `infra/cloudwatch.tf` — a CloudWatch log group (`/codebuild/rbp-e2e`, 30-day retention) for
+  CodeBuild's build logs.
+- `infra/iam.tf` — a least-privilege IAM role CodeBuild assumes to run builds, with an inline
+  policy scoped to exactly that log group's ARN (`logs:CreateLogGroup`/`CreateLogStream`/
+  `PutLogEvents` only — no wildcard log access).
+- `infra/codebuild.tf` — the CodeBuild project itself (`rbp-e2e-regression`), pointed at this
+  repo's GitHub source with a `buildspec.yml` path that doesn't exist yet (added when the
+  scheduled regression suite is wired up later in this phase); a `github_token` variable
+  (sensitive, `default = null`) supplies the source credential at apply time via
+  `TF_VAR_github_token` — never committed.
+- `infra/variables.tf` / `infra/outputs.tf` — shared `project` variable, and outputs for the
+  CodeBuild project name, role ARN, and log group name for later phases to reference.
+- Validated offline (`terraform init -backend=false`, `terraform validate`, `terraform fmt`) —
+  not yet planned/applied against real AWS, since Day 1's state backend was deliberately torn
+  down. Re-bootstrapping and planning/applying this is deferred until Day 3's resources (S3
+  report bucket, EventBridge schedule) are also written, so the full phase gets one comprehensive
+  `terraform plan` for review rather than a plan per day.
+
+Day 3 (pending go-ahead): S3 report bucket with lifecycle policy, EventBridge nightly schedule.
 `terraform plan`/`apply` always need explicit go-ahead — it's cost-incurring.

@@ -41,3 +41,19 @@ resource "aws_iam_role_policy" "codebuild_logs" {
   role   = aws_iam_role.codebuild.id
   policy = data.aws_iam_policy_document.codebuild_logs.json
 }
+
+# Write-only to exactly the reports bucket — no delete, no list-other-buckets. A compromised
+# build can publish a report but can't wipe the bucket's existing history.
+data "aws_iam_policy_document" "codebuild_reports" {
+  statement {
+    effect    = "Allow"
+    actions   = ["s3:PutObject"]
+    resources = ["${aws_s3_bucket.reports.arn}/*"]
+  }
+}
+
+resource "aws_iam_role_policy" "codebuild_reports" {
+  name   = "${var.project}-codebuild-reports"
+  role   = aws_iam_role.codebuild.id
+  policy = data.aws_iam_policy_document.codebuild_reports.json
+}

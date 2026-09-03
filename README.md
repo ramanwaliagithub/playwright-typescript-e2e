@@ -591,5 +591,22 @@ $ aws s3api head-bucket --bucket rbp-e2e-tfstate-f852008a
   report bucket, EventBridge schedule) are also written, so the full phase gets one comprehensive
   `terraform plan` for review rather than a plan per day.
 
-Day 3 (pending go-ahead): S3 report bucket with lifecycle policy, EventBridge nightly schedule.
-`terraform plan`/`apply` always need explicit go-ahead — it's cost-incurring.
+**Day 3 — S3 report bucket and EventBridge nightly schedule (written, not yet applied):**
+
+- `infra/s3.tf` — a private, AES256-encrypted S3 bucket
+  (`rbp-e2e-reports-<account-id>`) for regression reports, with a lifecycle rule expiring
+  objects after 90 days.
+- `infra/iam.tf` — extended CodeBuild's role with a write-only `s3:PutObject` grant scoped to
+  that bucket's ARN.
+- `infra/eventbridge.tf` — an EventBridge rule + its own least-privilege IAM role
+  (`codebuild:StartBuild` scoped to just this project) to trigger the CodeBuild project nightly.
+  **Ships disabled** (`schedule_enabled = false`) — enabling it before `buildspec.yml` exists
+  (Phase 10) would trigger real nightly builds that are guaranteed to fail.
+- Validated offline the same way as Day 2; still no real `plan`/`apply` against AWS.
+
+This closes out Phase 9's originally-scoped resources. Remaining before this infrastructure runs
+for real: re-bootstrap the state backend, provision the dedicated `rbp-e2e-terraform` IAM user
+(deferred from Day 1), run one comprehensive `terraform plan` covering everything above for
+review, then `apply` — each step needs explicit go-ahead, and `apply` is cost-incurring.
+
+Phase 9 complete.

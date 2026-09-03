@@ -1724,3 +1724,48 @@ accumulate all of Phase 9's resources first and then do one comprehensive `terra
 review, rather than a partial plan per day. Committed as three separate commits (log group → IAM
 role → CodeBuild project, in that dependency order so each one validates independently on its
 own), each pushed right after committing.
+
+### Phase 9 Day 3 — S3 report bucket, EventBridge nightly schedule
+
+Added the last two resources Day 3 was scoped to, plus the IAM wiring between them and what Day
+2 already created:
+
+1. **S3 report bucket** (`infra/s3.tf`) — `rbp-e2e-reports-<account-id>` (account ID via
+   `data.aws_caller_identity.current`, since S3 bucket names must be globally unique and this
+   avoids needing a `random_id` resource in the main root). Public access fully blocked,
+   AES256 server-side encryption, and a lifecycle rule expiring objects after 90 days plus
+   aborting incomplete multipart uploads after 7 — reports are disposable build artifacts, not
+   records to keep indefinitely.
+2. **IAM policy extension** (`infra/iam.tf`) — added a second inline policy to the existing
+   CodeBuild role: `s3:PutObject` scoped to `${aws_s3_bucket.reports.arn}/*` only. Write-only,
+   no delete/list — a compromised build can publish a report but can't touch the bucket's
+   existing history.
+3. **EventBridge nightly schedule** (`infra/eventbridge.tf`) — a `aws_cloudwatch_event_rule`
+   (`cron(0 2 * * ? *)` UTC by default, via a `schedule_expression` variable) targeting the
+   CodeBuild project, plus its own IAM role (`events.amazonaws.com` trust policy) with an inline
+   policy granting only `codebuild:StartBuild` on that one project's ARN. The rule's `state` is
+   driven by a `schedule_enabled` variable defaulting to `false` — it ships **disabled**, since
+   enabling it before `buildspec.yml` exists (Phase 10) would trigger real nightly builds
+   guaranteed to fail, wasting CodeBuild minutes and cluttering the log group for no reason.
+4. `infra/outputs.tf` — added `reports_bucket_name` and `nightly_schedule_rule_name`.
+
+```bash
+cd infra
+terraform init -backend=false -input=false
+terraform fmt -recursive -diff   # clean, no changes needed
+terraform validate
+# Success! The configuration is valid.
+```
+
+Committed as three separate commits, each independently valid without needing partial-file
+staging: `infra/s3.tf` alone (no dependency on anything added this day), then `infra/iam.tf`
+(depends on the now-committed bucket), then `infra/eventbridge.tf` + `infra/outputs.tf` together
+(the outputs file picks up both this day's new outputs in one hunk, so splitting it further
+would have needed a manual patch). Each pushed right after committing.
+
+Phase 9 Day 3 complete — all of Phase 9's originally-scoped Terraform is now written and
+validated offline. Still outstanding before any of it runs for real: re-bootstrap the state
+backend (`infra/bootstrap/`, torn down at the end of Day 1), provision the dedicated
+`rbp-e2e-terraform` IAM user (deferred from Day 1's staged-access plan), and run one
+comprehensive `terraform plan` across everything above for review before `apply` — each of
+those needs its own explicit go-ahead.

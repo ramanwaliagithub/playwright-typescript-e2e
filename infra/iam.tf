@@ -57,3 +57,34 @@ resource "aws_iam_role_policy" "codebuild_reports" {
   role   = aws_iam_role.codebuild.id
   policy = data.aws_iam_policy_document.codebuild_reports.json
 }
+
+data "aws_kms_alias" "ssm" {
+  name = "alias/aws/ssm"
+}
+
+# Read-only, scoped to exactly the 3 parameters this project owns, plus decrypt on the
+# AWS-managed SSM key those SecureStrings are encrypted under (not a customer-managed key, so
+# no extra KMS cost).
+data "aws_iam_policy_document" "codebuild_ssm" {
+  statement {
+    effect  = "Allow"
+    actions = ["ssm:GetParameters"]
+    resources = [
+      aws_ssm_parameter.admin_username.arn,
+      aws_ssm_parameter.admin_password.arn,
+      aws_ssm_parameter.base_url.arn,
+    ]
+  }
+
+  statement {
+    effect    = "Allow"
+    actions   = ["kms:Decrypt"]
+    resources = [data.aws_kms_alias.ssm.target_key_arn]
+  }
+}
+
+resource "aws_iam_role_policy" "codebuild_ssm" {
+  name   = "${var.project}-codebuild-ssm"
+  role   = aws_iam_role.codebuild.id
+  policy = data.aws_iam_policy_document.codebuild_ssm.json
+}

@@ -15,14 +15,14 @@ resource "aws_codebuild_source_credential" "github" {
   token       = var.github_token
 }
 
-# buildspec.yml doesn't exist in the repo yet — CodeBuild only reads it when a build actually
-# runs, not at Terraform-apply time. It's added when the scheduled regression suite is wired up.
 resource "aws_codebuild_project" "regression" {
   name          = "${var.project}-regression"
   description   = "Scheduled full regression suite for ${var.project}"
   service_role  = aws_iam_role.codebuild.arn
   build_timeout = 30
 
+  # buildspec.yml uploads reports to S3 itself (aws s3 cp), so no native CodeBuild artifacts —
+  # keeps full control over the report path layout instead of a flat build-id-named zip.
   artifacts {
     type = "NO_ARTIFACTS"
   }
@@ -32,6 +32,30 @@ resource "aws_codebuild_project" "regression" {
     image                       = "aws/codebuild/standard:7.0"
     type                        = "LINUX_CONTAINER"
     image_pull_credentials_type = "CODEBUILD"
+
+    environment_variable {
+      name  = "REPORTS_BUCKET"
+      value = aws_s3_bucket.reports.bucket
+      type  = "PLAINTEXT"
+    }
+
+    environment_variable {
+      name  = "ADMIN_USERNAME"
+      value = aws_ssm_parameter.admin_username.name
+      type  = "PARAMETER_STORE"
+    }
+
+    environment_variable {
+      name  = "ADMIN_PASSWORD"
+      value = aws_ssm_parameter.admin_password.name
+      type  = "PARAMETER_STORE"
+    }
+
+    environment_variable {
+      name  = "BASE_URL"
+      value = aws_ssm_parameter.base_url.name
+      type  = "PARAMETER_STORE"
+    }
   }
 
   logs_config {

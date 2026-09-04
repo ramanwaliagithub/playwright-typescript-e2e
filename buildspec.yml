@@ -1,0 +1,26 @@
+version: 0.2
+
+env:
+  variables:
+    TEST_ENV: hosted
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 24
+    commands:
+      - corepack enable
+      - corepack prepare pnpm@11.20.0 --activate
+      - pnpm install --frozen-lockfile
+      - pnpm exec playwright install --with-deps chromium firefox webkit
+
+  build:
+    commands:
+      - pnpm run test:hosted
+
+  post_build:
+    commands:
+      - REPORT_PREFIX="reports/$(date -u +%Y-%m-%dT%H-%M-%SZ)-${CODEBUILD_BUILD_NUMBER:-manual}"
+      - aws s3 cp playwright-report "s3://${REPORTS_BUCKET}/${REPORT_PREFIX}/playwright-report" --recursive
+      - pnpm run report:allure
+      - aws s3 cp allure-report "s3://${REPORTS_BUCKET}/${REPORT_PREFIX}/allure-report" --recursive

@@ -103,20 +103,21 @@ clutter. Here's what each one does and why it's here:
 | `data/*Factory.ts`                                 | Test data builders (`buildGuest`, `buildNewRoom`, `buildNewBooking`, `buildNewMessage`) using `@faker-js/faker` for realistic random values, with an `overrides` param for whatever a specific test needs to pin down. Replaces hardcoded literals (`'Jane'`, `'jane.doe@example.com'`, ...) scattered in specs. |
 | `Dockerfile`                                       | Builds the suite into a container image from Playwright's official base image, pinned to the exact `@playwright/test` version so the browser binaries baked into the image match the npm package.                                                                                                                |
 | `.dockerignore`                                    | Keeps `node_modules/`, `.git/`, report/result directories, and `.env` out of the image build context.                                                                                                                                                                                                            |
+| `buildspec.yml`                                    | AWS CodeBuild's build instructions for the scheduled full regression run — installs pnpm + browsers, runs the full suite against `hosted`, uploads the HTML and Allure reports to S3 (Phase 10).                                                                                                                 |
 
 ## Project structure
 
-| Folder      | Purpose                                                                                     |
-| ----------- | ------------------------------------------------------------------------------------------- |
-| `tests/`    | Playwright test specs (`tests/api/` holds pure API contract tests)                          |
-| `pages/`    | Page Object Model classes (Phase 3)                                                         |
-| `fixtures/` | Playwright `test.extend` fixtures wiring pages/API client into tests (Phase 3-4)            |
-| `utils/`    | Shared helpers (e.g. collision-safe random test data)                                       |
-| `api/`      | API client wrapper + zod schemas / typed models (Phase 4)                                   |
-| `config/`   | Zod-validated env loader, layered per-environment config, credentials (Phase 5)             |
-| `data/`     | Test data factories, built on `@faker-js/faker` (Phase 5)                                   |
-| `ci/`       | GitHub Actions workflow support files (Phase 8)                                             |
-| `infra/`    | Terraform: `bootstrap/` (state backend) + main root for CodeBuild/IAM/EventBridge (Phase 9) |
+| Folder      | Purpose                                                                                               |
+| ----------- | ----------------------------------------------------------------------------------------------------- |
+| `tests/`    | Playwright test specs (`tests/api/` holds pure API contract tests)                                    |
+| `pages/`    | Page Object Model classes (Phase 3)                                                                   |
+| `fixtures/` | Playwright `test.extend` fixtures wiring pages/API client into tests (Phase 3-4)                      |
+| `utils/`    | Shared helpers (e.g. collision-safe random test data)                                                 |
+| `api/`      | API client wrapper + zod schemas / typed models (Phase 4)                                             |
+| `config/`   | Zod-validated env loader, layered per-environment config, credentials (Phase 5)                       |
+| `data/`     | Test data factories, built on `@faker-js/faker` (Phase 5)                                             |
+| `ci/`       | GitHub Actions workflow support files (Phase 8)                                                       |
+| `infra/`    | Terraform: `bootstrap/` (state backend) + main root for CodeBuild/IAM/S3/SSM/EventBridge (Phase 9-10) |
 
 ## Page Object Model architecture
 
@@ -194,12 +195,16 @@ produces identical results to a local host run.
 
 ## Infrastructure (AWS/Terraform)
 
-`infra/` holds the Terraform for scheduled-regression infrastructure (Phase 9). Two roots:
+`infra/` holds the Terraform for scheduled-regression infrastructure (Phase 9-10). Two roots:
 
 - `infra/bootstrap/` — the S3 bucket + DynamoDB table that hold this project's own Terraform
   remote state. Uses local state itself (the remote backend can't exist before it's created).
-- `infra/` (root) — the main infrastructure (CodeBuild, IAM, EventBridge — landing in Phase 9
-  Day 2/3), configured to store its state in the bucket `infra/bootstrap/` creates.
+- `infra/` (root) — the main infrastructure: CodeBuild project + its IAM role, a CloudWatch log
+  group, an S3 bucket for regression reports, RBP admin credentials in SSM Parameter Store, and
+  an EventBridge nightly schedule (currently disabled) — configured to store its state in the
+  bucket `infra/bootstrap/` creates. Requires `TF_VAR_rbp_admin_username`,
+  `TF_VAR_rbp_admin_password`, and (for the GitHub source credential) `TF_VAR_github_token` at
+  apply time — never committed.
 
 **Current status: the state backend mechanism was built, applied against real AWS, verified
 working, and then deliberately torn down** — proof-of-concept, not a standing resource, so
@@ -610,3 +615,37 @@ for real: re-bootstrap the state backend, provision the dedicated `rbp-e2e-terra
 review, then `apply` — each step needs explicit go-ahead, and `apply` is cost-incurring.
 
 Phase 9 complete.
+
+### Phase 10 — CodeBuild Scheduled Regression
+
+**Credentials and buildspec (written, not yet applied):**
+
+- `infra/ssm.tf` — RBP admin username/password/base URL as SSM Parameter Store parameters
+  (`SecureString` for the credentials, encrypted under the default AWS-managed key). The
+  credentials themselves are unchanged from what tests already use locally — the shared,
+  public `automationintesting.online` instance's real admin login isn't something we can rotate
+  without affecting other people who use it for training. This only moves the values out of a
+  plaintext CodeBuild environment variable and into a properly secreted store, at zero ongoing
+  cost (Standard-tier parameters and AWS-managed-key decrypts are both free — deliberately not
+  AWS Secrets Manager, which charges per secret per month even idle).
+- `infra/iam.tf` — extended CodeBuild's role with read-only `ssm:GetParameters` scoped to those
+  3 parameters, plus `kms:Decrypt` scoped to the AWS-managed SSM key.
+- `infra/codebuild.tf` — the project now pulls `ADMIN_USERNAME`/`ADMIN_PASSWORD`/`BASE_URL` in
+  natively as `PARAMETER_STORE`-type environment variables, plus a plaintext `REPORTS_BUCKET`
+  variable pointing at the Day 3 S3 bucket.
+- `buildspec.yml` — installs pnpm + browsers, runs `pnpm run test:hosted` (the full suite, all 3
+  browsers — not just the PR-check smoke subset), then uploads both the Playwright HTML report
+  and a generated Allure report to S3 under a timestamped prefix, regardless of pass/fail.
+
+Same as Phase 9 Day 2/3: validated offline only (`terraform validate`/`fmt`), no real
+`plan`/`apply` yet. One thing that can only be confirmed on a real build: whether
+`aws/codebuild/standard:7.0`'s `runtime-versions: nodejs: 24` actually resolves to Node 24.
+
+Remaining before this runs for real: re-bootstrap the state backend, provision the dedicated
+`rbp-e2e-terraform` IAM user, supply `TF_VAR_rbp_admin_username`/`TF_VAR_rbp_admin_password`/
+`TF_VAR_github_token`, run one comprehensive `terraform plan` for review, then `apply` — each
+step needs explicit go-ahead. The EventBridge schedule stays disabled until a manual build has
+been proven to succeed against the real infrastructure.
+
+Failure notifications (Slack/Teams/email) were considered and explicitly deferred — buildspec
+ships without a notification step for now.

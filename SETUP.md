@@ -1769,3 +1769,62 @@ backend (`infra/bootstrap/`, torn down at the end of Day 1), provision the dedic
 `rbp-e2e-terraform` IAM user (deferred from Day 1's staged-access plan), and run one
 comprehensive `terraform plan` across everything above for review before `apply` — each of
 those needs its own explicit go-ahead.
+
+## Phase 10 — CodeBuild Scheduled Regression
+
+Before starting, raised two items flagged at earlier phases as "revisit before Phase 10":
+
+- **Failure notification channel** (Slack/Teams/email) — asked again; user chose to skip it for
+  now. `buildspec.yml` ships without a notification step; adding one is a later follow-up.
+- **RBP admin credentials** — flagged at kickoff as "propose alternate/rotated creds before
+  Phase 9/10." Concluded that literally rotating the credentials isn't the right move:
+  `automationintesting.online` is a shared public training instance other people also use, and
+  changing its real admin password would break it for them. What was actually agreed at kickoff
+  was a secrets _strategy_ (dotenv locally, a proper secret store in CI), not a credential
+  _rotation_ — and that hadn't been wired into Terraform yet. Proposed wiring the existing
+  credential values through AWS Secrets Manager; user redirected to **no ongoing cost**, which
+  ruled that out (Secrets Manager charges ~$0.40/secret/month even idle) in favor of SSM
+  Parameter Store (Standard tier, SecureString under the free AWS-managed key) instead.
+
+**Credentials and buildspec, written and validated offline:**
+
+1. `infra/ssm.tf` — 3 SSM parameters: `/rbp-e2e/ADMIN_USERNAME` and `/rbp-e2e/ADMIN_PASSWORD`
+   (`SecureString`, no default — supplied via `TF_VAR_rbp_admin_username`/
+   `TF_VAR_rbp_admin_password` at apply time, never committed) and `/rbp-e2e/BASE_URL` (plain
+   `String`, defaults to `https://automationintesting.online`). Deliberately Standard tier (not
+   Advanced) and the default `alias/aws/ssm` AWS-managed KMS key (not a customer-managed key) —
+   both free, unlike Secrets Manager.
+2. `infra/iam.tf` — extended the CodeBuild role with `ssm:GetParameters` scoped to exactly
+   those 3 parameter ARNs, plus `kms:Decrypt` scoped to the SSM-managed key's ARN (looked up via
+   a `data "aws_kms_alias"` block rather than hardcoding the key ID).
+3. `infra/codebuild.tf` — added 4 `environment_variable` blocks to the project's `environment`:
+   `REPORTS_BUCKET` (`PLAINTEXT`, the Day 3 bucket name) and `ADMIN_USERNAME`/`ADMIN_PASSWORD`/
+   `BASE_URL` (`PARAMETER_STORE` type — CodeBuild resolves and decrypts these natively at build
+   start, so the values never appear in the buildspec or Terraform config).
+4. `buildspec.yml` (repo root) — `install` phase installs pnpm (via corepack) and all 3
+   browsers; `build` phase runs `pnpm run test:hosted` (the full suite, not the PR-check smoke
+   subset); `post_build` uploads the Playwright HTML report and a freshly generated Allure
+   report to `s3://$REPORTS_BUCKET/reports/<UTC timestamp>-<build number>/`, run unconditionally
+   so a failed build still leaves its reports behind for inspection.
+
+```bash
+cd infra
+terraform init -backend=false -input=false
+terraform fmt -recursive -diff   # clean, no changes needed
+terraform validate
+# Success! The configuration is valid.
+```
+
+Committed as four separate commits (SSM parameters → IAM grant → CodeBuild wiring → buildspec),
+each independently valid, each pushed right after committing.
+
+**Known unknown, can't be resolved without a real build:** whether `aws/codebuild/standard:7.0`'s
+`runtime-versions: nodejs: 24` actually resolves to Node 24 — AWS updates that image tag's
+available runtime versions over time rather than keeping it immutable, so this can only be
+confirmed on the first real CodeBuild run, not by reading documentation now.
+
+Remaining before this runs for real: re-bootstrap the state backend, provision the dedicated
+`rbp-e2e-terraform` IAM user, supply the three `TF_VAR_*` values at apply time, run one
+comprehensive `terraform plan` for review, then `apply`. The EventBridge schedule stays disabled
+(`schedule_enabled = false`) until a manual build has been proven to succeed against the real
+infrastructure — only then does it make sense to flip it on and re-apply.

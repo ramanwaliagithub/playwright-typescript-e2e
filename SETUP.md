@@ -1828,3 +1828,76 @@ Remaining before this runs for real: re-bootstrap the state backend, provision t
 comprehensive `terraform plan` for review, then `apply`. The EventBridge schedule stays disabled
 (`schedule_enabled = false`) until a manual build has been proven to succeed against the real
 infrastructure — only then does it make sense to flip it on and re-apply.
+
+## Phase 11a — Flake Quarantine & Self-Healing Locators
+
+Moved to Phase 11 (Enterprise Hardening) even though Phase 10 Day 2/3's verification (a real
+manual CodeBuild run, confirming the EventBridge schedule fires) is still blocked on the
+deferred `terraform apply` — explicit user call, not a silent skip. Recovered the original
+roadmap artifact first to confirm Phase 11's actual day-chunk scope (11a/11b/11c) rather than
+guessing it from memory.
+
+**Self-healing locators, built and retrofitted onto real page objects:**
+
+1. `utils/SelfHealingLocator.ts` — wraps a primary + fallback `Locator` pair. `resolve()` calls
+   `primary.waitFor({ state: 'attached', timeout: 2000 })`; on timeout it attaches a diagnostic
+   note to the running test (via `test.info().attach(...)`, imported directly from
+   `@playwright/test` — allowed here since the project's lint boundary banning that import only
+   applies to `tests/**`, not `pages/`/`utils/`) and returns the fallback locator instead of
+   throwing. Exposes `click()`/`fill()` — the two actions actually needed at the two call sites
+   below; not built out further speculatively.
+2. Retrofitted `AdminLoginPage`'s login button (`#doLogin` primary → `getByRole('button', {name:
+/log ?in/i})` fallback) and `AdminRoomsPage`'s room delete button (`.roomDelete` primary →
+   `getByRole('button', {name: /delete/i})` fallback) — the two most CSS-class/ID-coupled
+   interactive elements among the current page objects, picked by inspecting every existing
+   locator rather than guessing.
+
+Proof, not just typecheck/lint: ran `tests/admin-rooms.spec.ts` + `tests/smoke.spec.ts` against
+the hosted instance with the retrofit in place (2 passed), confirming the wrapper's happy path
+(primary locator resolves normally, fallback never triggers) doesn't change existing behavior.
+Then ran the **full** suite once more for a broader regression check:
+
+```bash
+TEST_ENV=hosted pnpm exec playwright test --project=chromium
+# Running 7 tests using 7 workers ... 7 passed (7.1s)
+```
+
+**Flake quarantine mechanism, and a real bug caught while proving it:**
+
+1. First attempt: `playwright.config.ts`'s `grepInvert: /@quarantine/` (excluding tagged tests
+   from every normal run) plus a `test:quarantine` package.json script running
+   `playwright test --grep @quarantine` (to select only tagged tests, for checking whether one
+   has stabilized).
+2. **Proof caught a real bug in this design**, using the same never-committed-temporary-test
+   technique as Phase 6's failure-artifact verification: added a throwaway
+   `tests/_tmp-quarantine-proof.spec.ts` tagged `{ tag: '@quarantine' }`, then ran
+   `playwright test --grep @quarantine --list` — got `Error: No tests found`, not the expected
+   single test. Root-caused by reading `node_modules/.pnpm/playwright@1.62.1/.../runner/index.js`
+   directly rather than guessing: CLI `--grep`/`--grep-invert` **AND with** config's
+   `grep`/`grepInvert` (both filters chain via `preOnlyTestFilters.push`), they don't replace
+   config's setting — so a `@quarantine`-tagged test was excluded by config's `grepInvert` before
+   the CLI's `--grep` ever got a chance to select it.
+3. Fixed by switching to an env-var-driven config toggle instead of a CLI flag:
+   ```ts
+   const quarantineOnly = process.env['QUARANTINE_ONLY'] === 'true';
+   // ...
+   ...(quarantineOnly ? { grep: /@quarantine/ } : { grepInvert: /@quarantine/ }),
+   ```
+   (`process.env['QUARANTINE_ONLY']` not `process.env.QUARANTINE_ONLY` —
+   `noPropertyAccessFromIndexSignature` under this project's strict `tsconfig.json` requires
+   bracket access for index-signature properties.) `test:quarantine` now runs
+   `cross-env QUARANTINE_ONLY=true TEST_ENV=hosted playwright test` — no CLI `--grep` needed,
+   config alone decides which of `grep`/`grepInvert` is active. A first version tried
+   `grep: quarantineOnly ? /@quarantine/ : undefined` directly, which failed `tsc --noEmit` under
+   `exactOptionalPropertyTypes: true` (`undefined` isn't assignable where the field is typed
+   `RegExp | RegExp[]`, only _absent_); fixed by conditionally spreading in only the one field
+   that should be present (`...(quarantineOnly ? {grep: ...} : {grepInvert: ...})`) rather than
+   setting the other to `undefined`.
+4. Re-verified both directions with the same temporary test: default run listed only
+   `smoke.spec.ts` (quarantined test excluded); `QUARANTINE_ONLY=true` run listed only the
+   quarantined test. Removed `tests/_tmp-quarantine-proof.spec.ts` before committing — never
+   part of any commit.
+
+Committed as two commits (self-healing locators, then the quarantine mechanism), each pushed
+right after committing. No tests are currently quarantined — the mechanism exists for the next
+time one is needed, not because one exists today.

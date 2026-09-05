@@ -14,6 +14,7 @@
     "test:ui": "playwright test --ui",
     "test:hosted": "cross-env TEST_ENV=hosted playwright test",
     "test:local": "cross-env TEST_ENV=local playwright test",
+    "test:quarantine": "cross-env QUARANTINE_ONLY=true TEST_ENV=hosted playwright test",
     "report": "playwright show-report",
     "report:allure": "allure generate allure-results --clean -o allure-report",
     "report:allure:open": "allure open allure-report",

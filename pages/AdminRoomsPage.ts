@@ -1,5 +1,6 @@
 import type { Locator } from '@playwright/test';
 import { BasePage } from './BasePage.js';
+import { SelfHealingLocator } from '../utils/SelfHealingLocator.js';
 
 export type RoomType = 'Single' | 'Twin' | 'Double' | 'Family' | 'Suite';
 export type RoomFeature = 'WiFi' | 'TV' | 'Radio' | 'Refreshments' | 'Safe' | 'Views';
@@ -49,6 +50,12 @@ export class AdminRoomsPage extends BasePage {
   }
 
   async deleteRoom(roomNumber: string): Promise<void> {
-    await this.roomRow(roomNumber).locator('.roomDelete').click();
+    const row = this.roomRow(roomNumber);
+    const deleteButton = new SelfHealingLocator(
+      row.locator('.roomDelete'),
+      row.getByRole('button', { name: /delete/i }),
+      `delete button for room ${roomNumber}`,
+    );
+    await deleteButton.click();
   }
 }

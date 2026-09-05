@@ -649,3 +649,33 @@ been proven to succeed against the real infrastructure.
 
 Failure notifications (Slack/Teams/email) were considered and explicitly deferred — buildspec
 ships without a notification step for now.
+
+### Phase 11a — Flake Quarantine & Self-Healing Locators
+
+**Self-healing locators:** [`utils/SelfHealingLocator.ts`](./utils/SelfHealingLocator.ts) wraps
+a primary + fallback locator pair. If the primary hasn't attached within 2 seconds, it falls
+back to a secondary strategy (typically role/text-based) instead of failing outright, and
+attaches a note to the test report so a degrading selector stays visible before it breaks
+completely. Applied today to the two most CSS-class/ID-coupled interactive elements in the
+current page objects: `AdminLoginPage`'s login button and `AdminRoomsPage`'s room delete button.
+Adopt it for other brittle locators as they're identified, not everywhere by default.
+
+**Flake quarantine:** tag a test `{ tag: '@quarantine' }` instead of leaving a known flake (one
+retries don't fix) failing in the main run:
+
+```ts
+test('some flaky flow', { tag: '@quarantine' }, async ({ page }) => {
+  /* ... */
+});
+```
+
+`playwright.config.ts` excludes `@quarantine`-tagged tests from every normal run (`pnpm test`,
+CI smoke, the nightly regression) via `grepInvert`. Run `pnpm run test:quarantine` to check
+whether a quarantined test has stabilized — it flips the config to select _only_ tagged tests
+instead (Playwright's CLI `--grep` ANDs with config's `grepInvert` rather than overriding it, so
+this needed an env-var-driven config switch, not a CLI flag). Remove the tag once a test passes
+reliably — don't leave it quarantined indefinitely. No tests are currently quarantined.
+
+Both mechanisms were proven against the real hosted instance, not just typechecked: the full
+7-test suite passes with the retrofitted locators, and the quarantine filter was verified in
+both directions with a temporary tagged test (removed before committing).

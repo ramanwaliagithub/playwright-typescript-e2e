@@ -1901,3 +1901,106 @@ TEST_ENV=hosted pnpm exec playwright test --project=chromium
 Committed as two commits (self-healing locators, then the quarantine mechanism), each pushed
 right after committing. No tests are currently quarantined — the mechanism exists for the next
 time one is needed, not because one exists today.
+
+## Phase 11b — Visual Regression & Accessibility Baseline
+
+### Visual regression, including a real baseline-generation decision and two real bugs
+
+Asked the user up front how to generate baselines, since Windows renders very differently from
+Linux (font/anti-aliasing) and CI/CodeBuild both run on Linux — a Windows-generated baseline
+would be useless there. Two options: start Docker locally (Phase 7's image), or a one-off
+GitHub Actions `workflow_dispatch` job. User picked Docker despite this machine's prior WSL2
+instability history.
+
+1. Wrote `tests/visual/pages.visual.spec.ts` — `toHaveScreenshot()` on the booking homepage
+   (statically pre-rendered per the Phase 4 lesson, so stable despite the shared instance's live
+   data) and the admin login page (static form). `maxDiffPixelRatio: 0.01` for minor rendering
+   tolerance. Strengthened `BookingHomePage.open()`/`AdminLoginPage.open()` to wait for a real
+   element (`roomCards.first()` / `usernameInput`) before returning, so a screenshot never fires
+   mid-render — a genuine improvement to both page objects, not just a visual-test-only hack.
+2. Docker wasn't running (`docker info` failed). Started it:
+   ```powershell
+   Start-Process "$env:LOCALAPPDATA\Programs\DockerDesktop\Docker Desktop.exe"
+   ```
+   (Per-user install path from the Phase 7 incident notes, not `C:\Program Files\Docker\...`,
+   which doesn't exist on this machine.) Came up cleanly this time — polled `docker info` in a
+   loop, ready within one 5-second check.
+3. `docker build -t rbp-e2e:local .` — reused the existing Dockerfile as-is.
+4. **First bug**: ran
+   `docker run --rm -v "/d/.../tests:/app/tests" rbp-e2e:local pnpm exec playwright test tests/visual --update-snapshots`
+   — appeared to succeed (6 passed, "writing actual" messages), but `find tests/visual` on the
+   host afterward showed **no snapshot files at all**, just the spec file. Root cause: Git
+   Bash's automatic path conversion mangled the container-side `-v` argument (`/app/tests`) into
+   a Windows path (`C:/Program Files/Git/app/tests`) before Docker ever saw it, so the bind
+   mount silently pointed nowhere and the container wrote its snapshots into its own ephemeral
+   filesystem, discarded on `--rm`. Confirmed by running a plain `ls` inside the container against
+   the same mount and seeing the mangled path fail outright. Fixed by prefixing every subsequent
+   `docker run` with `MSYS_NO_PATHCONV=1`, which disables Git Bash's path conversion for that
+   command. Re-ran baseline generation; this time 6 PNGs actually landed on the host.
+5. Visually inspected two of the six generated baselines directly (Read tool image preview) to
+   confirm they captured real page content, not blank/error renders, before trusting them.
+6. Re-ran the same spec (no `--update-snapshots`) inside the container — 6/6 passed against the
+   baselines just generated, proving the comparison mechanism itself works end-to-end, not just
+   that files got written.
+7. **Second finding, not a bug but worth recording**: Playwright _does_ suffix screenshot
+   filenames by platform automatically (`admin-login-chromium-linux.png`, etc.) — contradicts
+   what a first read of `node_modules/.../playwright/lib/worker/workerProcessEntry.js`'s generic
+   `snapshotSuffix` field (defaults to `""`) suggested. `toHaveScreenshot()` specifically has its
+   own default path template (checked via `expect.toHaveScreenshot.pathTemplate` before falling
+   back to the generic one) that does bake in platform — the generic-path reading was accurate
+   for `toMatchSnapshot()`-style snapshots but not for screenshots specifically. Corrected an
+   initially-wrong code comment in the spec file once this was confirmed empirically rather than
+   left it stating the disproven assumption.
+8. Sanity-checked the platform-suffix behavior by running the same spec natively on Windows
+   (no Docker): failed cleanly with "no baseline exists for win32" rather than a false
+   pixel-mismatch against the Linux baseline — confirms local native runs are safe, just
+   expected-red until Docker is used.
+9. **Third bug, caught only because of step 8**: that native Windows verification run itself
+   wrote two `-win32.png` "actual" files into the snapshots directory, and a broad
+   `git add tests/visual/` swept them into the first commit alongside the six intended Linux
+   baselines. Caught by reviewing `git show --stat HEAD` before pushing (not routine — done
+   because the file count looked one line off from what nine files were expected). Fixed since
+   the commit hadn't been pushed yet: deleted the two stray PNGs from disk, `git reset --soft
+HEAD~1` to uncommit (safe — nothing shared yet, not an amend), re-staged, recommitted clean.
+10. Cleaned up: removed the local `rbp-e2e:local` Docker image afterward; left Docker Desktop
+    running (no reason to stop it, and stopping it wasn't asked for).
+
+### Accessibility baseline, including a real TypeScript/package-resolution bug
+
+1. `pnpm add -D @axe-core/playwright`.
+2. First attempt, `import AxeBuilder from '@axe-core/playwright'`, failed `tsc --noEmit`:
+   `error TS2351: This expression is not constructable.` — the resolved type was
+   `typeof import(".../dist/index")`, i.e. TypeScript treated the import as the _whole module
+   namespace_, not the `AxeBuilder` class specifically. A named import
+   (`import { AxeBuilder } from ...`) hit the exact same error. Root-caused by isolating the
+   problem in a standalone probe file (`tsc --noEmit probe.ts --ignoreConfig` with explicit
+   compiler flags) to rule out this project's own tsconfig as the cause, then confirming both
+   `dist/index.d.ts` and `dist/index.d.mts` exist with identical content (`export { AxeBuilder,
+AxeBuilder as default };`) — the package's own types are fine in isolation; this project's
+   pinned TypeScript version can't reconcile them because the package's `exports` map doesn't
+   split `"types"` per `import`/`require` condition. Fixed by importing as a namespace and
+   reading the property off it instead: `import * as AxeCorePlaywright from
+'@axe-core/playwright'; const { AxeBuilder } = AxeCorePlaywright;` — confirmed via the same
+   probe file that this resolves cleanly, then applied to the real spec.
+3. Wrote `tests/accessibility/pages.a11y.spec.ts` scanning the booking homepage and admin login
+   page, initially asserting zero serious/critical violations.
+4. **Ran it for real against the hosted instance — failed immediately**, exactly as expected for
+   a third-party app not under this project's control. Got the _full_ violation list via a
+   temporary throwaway probe spec (`tests/_tmp-a11y-probe.spec.ts`, console-logging distinct
+   `id (impact)` pairs, removed before committing) rather than guessing from the first
+   truncated failure's stack trace:
+   ```
+   booking homepage: color-contrast (serious), heading-order (moderate), label (critical),
+     landmark-one-main (moderate), link-name (serious), region (moderate)
+   admin login page: color-contrast (serious), landmark-one-main (moderate),
+     page-has-heading-one (moderate), region (moderate)
+   ```
+5. Redesigned around this real data: filter to serious/critical impact only (moderate/minor are
+   explicitly out of scope for this baseline), then further filter out an explicit, commented
+   per-page "known issue" allowlist (`color-contrast`/`label`/`link-name` for the homepage;
+   `color-contrast` for admin login) — so the test gates on _new_ serious/critical violations,
+   not the ones already known and accepted. Re-ran against the real instance across all 3
+   browsers: 6/6 passed.
+
+Committed as two commits (visual regression, then accessibility), each pushed right after
+committing.

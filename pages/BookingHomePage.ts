@@ -23,6 +23,7 @@ export class BookingHomePage extends BasePage {
 
   async open(): Promise<void> {
     await this.goto('/');
+    await this.roomCards.first().waitFor();
   }
 
   /** Defaults to a randomized future date, so repeated runs don't collide with dates a

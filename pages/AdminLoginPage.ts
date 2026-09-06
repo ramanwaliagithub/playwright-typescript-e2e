@@ -13,6 +13,7 @@ export class AdminLoginPage extends BasePage {
 
   async open(): Promise<void> {
     await this.goto('/admin');
+    await this.usernameInput.waitFor();
   }
 
   async login(username: string, password: string): Promise<void> {

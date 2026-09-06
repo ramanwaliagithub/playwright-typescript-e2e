@@ -679,3 +679,45 @@ reliably — don't leave it quarantined indefinitely. No tests are currently qua
 Both mechanisms were proven against the real hosted instance, not just typechecked: the full
 7-test suite passes with the retrofitted locators, and the quarantine filter was verified in
 both directions with a temporary tagged test (removed before committing).
+
+### Phase 11b — Visual Regression & Accessibility Baseline
+
+**Visual regression** ([`tests/visual/pages.visual.spec.ts`](./tests/visual/pages.visual.spec.ts)):
+full-page `toHaveScreenshot()` comparisons of the booking homepage (statically pre-rendered — see
+the Phase 4 lesson above, so it's a stable target despite the shared instance's live data) and
+the admin login page (a static form, no data dependency). `maxDiffPixelRatio: 0.01` tolerates
+minor rendering noise without masking a real regression.
+
+**Baselines must be generated via Docker, never on a bare host OS** — font/anti-aliasing
+rendering differs enough between Windows/macOS/Linux that a baseline from one won't pixel-match
+a run on another, and CI/CodeBuild both run on Linux:
+
+```bash
+docker build -t rbp-e2e:local .
+docker run --rm -e TEST_ENV=hosted -v "$(pwd)/tests:/app/tests" rbp-e2e:local \
+  pnpm exec playwright test tests/visual --update-snapshots
+```
+
+(On Windows via Git Bash, prefix with `MSYS_NO_PATHCONV=1` — otherwise Git Bash mangles the
+container-side `/app/tests` path into a Windows path and the volume mount silently goes nowhere.)
+Playwright suffixes screenshot filenames by platform automatically (`-linux`, `-win32`, ...), so
+running this suite natively on Windows won't falsely compare against the committed Linux
+baseline — it correctly reports no baseline exists for `win32` and fails with a clear message,
+which is expected, not a bug. Only regenerate baselines deliberately (a real UI change), not to
+make a failing test pass.
+
+**Accessibility baseline**
+([`tests/accessibility/pages.a11y.spec.ts`](./tests/accessibility/pages.a11y.spec.ts)): scans
+the same two pages with [axe-core](https://github.com/dequelabs/axe-core) via
+`@axe-core/playwright`, gating on new serious/critical violations only. RBP is a third-party demo
+app we don't control — a real scan found genuine pre-existing issues (color-contrast in its dark
+navbar/footer, plus an unlabeled control and a nameless link on the homepage) that are accepted
+as a known baseline rather than failed on; moderate/minor-impact violations exist too but are out
+of scope for this initial gate. Update the accepted list deliberately if a fresh scan shows it's
+stale — never just to make a failing test green.
+
+Note: `import * as AxeCorePlaywright from '@axe-core/playwright'` (namespace import, not
+`import AxeBuilder from ...`) is deliberate — this project's pinned TypeScript version can't
+resolve a default or named-destructured import of this package's class under `NodeNext` module
+resolution ("This expression is not constructable"); the namespace-then-property-access form
+resolves correctly.

@@ -93,6 +93,8 @@ jobs:
           cache: 'pnpm'
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec playwright install --with-deps ${{ matrix.browser }}
+      - name: List affected tests
+        run: pnpm exec playwright test --only-changed=origin/main --pass-with-no-tests --project=${{ matrix.browser }} --list
       - run: pnpm exec playwright test --only-changed=origin/main --pass-with-no-tests --project=${{ matrix.browser }}
         env:
           TEST_ENV: hosted

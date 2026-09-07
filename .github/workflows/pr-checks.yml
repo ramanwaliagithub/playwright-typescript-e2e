@@ -37,6 +37,10 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm run typecheck
 
+  # Unconditional quality-gate floor: every PR gets at least this signal, regardless of what the
+  # `affected` job's --only-changed selection below finds — guards against blind spots where a
+  # change (e.g. to playwright.config.ts) doesn't register as "affecting" any spec file under
+  # module-graph-based dependency tracking, but should still get some real coverage.
   smoke:
     runs-on: ubuntu-latest
     strategy:
@@ -59,5 +63,42 @@ jobs:
         if: failure()
         with:
           name: playwright-report-${{ matrix.browser }}
+          path: playwright-report/
+          retention-days: 7
+
+  # Test-impact-based selective execution: runs whatever spec files Playwright's own module-graph
+  # dependency tracking determines are actually affected by this PR's diff (not just a fixed
+  # subset) — a PR touching only docs/infra/CI-config triggers zero tests here (a clean pass via
+  # --pass-with-no-tests, not a failure), while one touching a page object, util, or config file
+  # picks up every spec that transitively depends on it. Deliberately not using
+  # --fail-on-flaky-tests here or in `smoke` — it would fight the retries:2 accommodation already
+  # in place for the shared hosted instance's transient slowness, turning expected retries into
+  # hard failures.
+  affected:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # --only-changed needs real git history to diff against; the default shallow checkout
+          # doesn't have origin/main's commits available and fails outright.
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install --with-deps ${{ matrix.browser }}
+      - run: pnpm exec playwright test --only-changed=origin/main --pass-with-no-tests --project=${{ matrix.browser }}
+        env:
+          TEST_ENV: hosted
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report-affected-${{ matrix.browser }}
           path: playwright-report/
           retention-days: 7

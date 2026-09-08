@@ -721,3 +721,37 @@ Note: `import * as AxeCorePlaywright from '@axe-core/playwright'` (namespace imp
 resolve a default or named-destructured import of this package's class under `NodeNext` module
 resolution ("This expression is not constructable"); the namespace-then-property-access form
 resolves correctly.
+
+### Phase 11c — Test-Impact Selective Execution & Quality Gate
+
+`.github/workflows/pr-checks.yml` gained a new `affected` job (non-blocking, not a required
+check) alongside the existing, unconditional `smoke` job:
+
+- **`affected`**: uses Playwright's native `--only-changed=origin/main` flag to run only the
+  spec files its dependency tracking determines are impacted by the PR's diff, sharded across
+  the 3 browsers, with `--pass-with-no-tests` so a docs/infra-only PR cleanly selects zero tests
+  instead of failing. A `--list` step runs first so the actual selection is always visible in
+  the CI log, not just a pass/fail count.
+- **`smoke`**: unchanged, still runs on every PR regardless — the real, trustworthy gate.
+
+**This was verified via a real PR (`#4`), not just locally** — a `pull_request`-triggered
+workflow change can't be proven any other way (same lesson as Phase 8). That verification
+surfaced a real, important limitation: `--only-changed`'s dependency tracking is reliable for a
+changed spec file, a file a spec imports directly (e.g. `config/credentials.ts`), and the shared
+`fixtures/pages.fixture.ts` file itself (correctly marks every spec affected) — but **not** for
+page object files (`pages/*.ts`), which consistently failed to surface their real dependent
+specs on both Windows (local) and Linux (the actual GH Actions runner), pointing at an unrelated
+spec instead. Root cause unconfirmed. Since page objects are the core unit of change in this
+Page-Object-Model framework, `affected` is intentionally **not** a required check and must not
+be treated as complete coverage for anything beyond docs/infra-only changes — `smoke` remains
+the only job every PR can actually be trusted against. See the workflow file's own comments for
+the full detail.
+
+Deliberately not using `--fail-on-flaky-tests` in either job — it would fight the `retries: 2`
+accommodation already in place for the shared hosted instance's transient slowness, turning
+expected retries into hard CI failures rather than a quality signal.
+
+**Phase 11 complete — the full 11-phase roadmap is now built.** What remains is entirely
+about running the infrastructure for real: the deferred Phase 9/10 Terraform `apply` cycle (see
+that phase's section above) and, longer-term, whatever operational lessons come from actually
+running the nightly regression once it's live.

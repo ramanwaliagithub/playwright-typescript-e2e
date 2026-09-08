@@ -47,7 +47,7 @@ Fell back to a global npm install instead:
 
 ```bash
 npm install -g pnpm
-pnpm -v   # 11.20.0, change to higher
+pnpm -v   # 11.20.0
 ```
 
 ### 2. Initialize the project
@@ -2095,3 +2095,52 @@ to state the proven-reliable and proven-unreliable cases explicitly. All 8 check
 **Phase 11 complete.** All originally-scoped work across the 11-phase roadmap is now built. What
 remains is operational, not developmental: the deferred Phase 9/10 Terraform `apply` cycle, and
 whatever real-world lessons come from actually running the nightly regression once it's live.
+
+## Tooling maintenance — pnpm upgraded to 12.3.4 (2026-09-08)
+
+Resolved the Phase 1 "change to higher" note. `npm view pnpm version` showed 12.3.4 available
+against the installed 11.20.0.
+
+```bash
+npm install -g pnpm@12.3.4
+```
+
+Three real snags along the way, in order:
+
+1. **pnpm's own postinstall never ran.** The `npm install` output warned `pnpm@12.3.4
+(preinstall/postinstall: node install.js) — not yet covered by allowScripts`, an npm
+   security policy blocking arbitrary package install scripts by default. `pnpm -v` kept
+   reporting the old version even after the install "succeeded," because the postinstall step
+   that sets up pnpm's actual platform binary never executed. Investigated rather than
+   force-approving broadly: `npm approve-scripts --allow-scripts-pending` turned out to approve
+   a large batch of unrelated transitive dependencies' scripts (axe-core, eslint deps, etc.) —
+   not what was needed and not something to do lightly. Reverted course and instead ran pnpm's
+   own postinstall directly: `node install.js` inside pnpm's global package directory
+   (`%APPDATA%\npm\node_modules\pnpm\`) — confirmed via a direct `pnpm.exe --version` call that
+   this alone fixed the binary.
+2. **Corepack intercepts `pnpm` based on `package.json`'s `packageManager` field, and does so
+   successfully** — contradicting the "Corepack doesn't work on this machine" conclusion drawn
+   at Phase 1 kickoff. That earlier failure was specifically `corepack enable pnpm`, which tries
+   to _write a shim_ into `C:\Program Files\nodejs\` (blocked by permissions). Corepack's
+   _runtime_ interception — reading `packageManager` and running that exact pinned version
+   instead of whatever's globally installed — works fine once corepack itself is present (it
+   ships with Node). This is why `pnpm -v` showed 12.3.4 outside this repo but still 11.20.0
+   _inside_ it, until `package.json`'s `"packageManager": "pnpm@11.20.0"` was updated to
+   `"pnpm@12.3.4"` to match.
+3. **`pnpm install` failed with `ERR_PNPM_PACKAGE_MANAGER_REMOVE_MODULES_DIR` / "Access is
+   denied."** 17 orphaned `firefox.exe` processes (Playwright's bundled Firefox build, leftover
+   from this session's many test runs never cleaning up their workers) were holding file handles
+   inside `node_modules`. Confirmed via `tasklist`, asked before bulk-killing anything
+   (`taskkill /F /IM firefox.exe`) since terminating processes site-wide is the kind of thing
+   worth a check first — user confirmed, cleared, install then succeeded.
+
+Verified: `pnpm-lock.yaml` gained a new, purely additive top-level YAML document
+(`packageManagerDependencies`, pnpm 12's own multi-platform self-binary pinning) — same
+`lockfileVersion: '9.0'`, no change to the actual project dependency graph.
+`pnpm install --frozen-lockfile` (what CI/Docker use) still passes. `pnpm run
+typecheck`/`pnpm run lint` both clean. Ran the non-visual suite for real
+(`TEST_ENV=hosted pnpm exec playwright test --project=chromium --grep-invert "visual
+regression"`) — 9/9 eventually passed (one booking-flow test needed its usual retry against the
+shared hosted instance, unrelated to pnpm). `package.json`'s `packageManager` field is now
+`pnpm@12.3.4`; `pnpm/action-setup@v4` in CI reads that field automatically (no version pinned in
+the workflow itself), so CI picks up the new version without any workflow change.

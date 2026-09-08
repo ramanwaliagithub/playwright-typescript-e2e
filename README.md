@@ -44,9 +44,15 @@ See `SETUP.md`'s "Cumulative tooling requirements" table for the full list with 
 
 ```bash
 pnpm install
-pnpm exec playwright install --with-deps chromium firefox webkit # Can keep chromium only
+pnpm exec playwright install --with-deps chromium firefox webkit
 cp .env.example .env   # defaults already point at the hosted RBP instance
 ```
+
+Installing all 3 browsers matches what CI and the nightly regression actually run — needed if
+you want full parity. For quick local iteration, `pnpm exec playwright install --with-deps
+chromium` alone is enough; just pass `--project=chromium` on your `pnpm test`/`pnpm exec
+playwright test` commands so Playwright doesn't try to launch firefox/webkit binaries that
+were never installed.
 
 ## Running tests
 

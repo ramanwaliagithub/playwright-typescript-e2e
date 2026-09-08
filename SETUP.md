@@ -2004,3 +2004,94 @@ AxeBuilder as default };`) — the package's own types are fine in isolation; th
 
 Committed as two commits (visual regression, then accessibility), each pushed right after
 committing.
+
+## Phase 11c — Test-Impact Selective Execution & Quality Gate
+
+### Design, grounded in a real native Playwright feature rather than a hand-rolled one
+
+Before designing anything custom, checked whether Playwright itself already had a test-impact
+mechanism — found `--only-changed [ref]` via `playwright test --help`, and confirmed in
+`node_modules/.../playwright/lib/runner/index.js` that it calls
+`import_common8.cc.affectedTestFiles(...)`, a real module-dependency-graph lookup (not just a
+literal "did this test file's own git-diff status change" check) — so page-object-level changes
+_should_, in principle, surface their dependent specs.
+
+Design: a new `affected` job (`--only-changed=origin/main --pass-with-no-tests`, sharded by
+browser) alongside the existing, always-unconditional `smoke` job as the quality-gate floor.
+Explicitly decided against `--fail-on-flaky-tests` (also a real native flag, confirmed via
+`--help`) — it would fight the `retries: 2` accommodation already in place for the shared hosted
+instance's transient slowness (a Phase 2 decision), turning an expected retry into a hard
+failure.
+
+### Local verification found a real limitation before this ever reached CI
+
+```bash
+TEST_ENV=hosted pnpm exec playwright test --only-changed=HEAD~2 --pass-with-no-tests --project=chromium --list
+# docs-only range → Total: 0 tests in 0 files — correct
+TEST_ENV=hosted pnpm exec playwright test --only-changed=HEAD~6 --pass-with-no-tests --project=chromium --list
+# range including the visual+a11y spec additions → correctly selected both new spec files
+```
+
+Then tested the transitive case — an uncommitted change to `pages/AdminRoomsPage.ts` only:
+
+```bash
+echo "// touch" >> pages/AdminRoomsPage.ts
+TEST_ENV=hosted pnpm exec playwright test --only-changed=HEAD --pass-with-no-tests --project=chromium --list
+# Expected: admin-rooms.spec.ts (and anything else using adminRoomsPage)
+# Actual: only tests/accessibility/pages.a11y.spec.ts — which doesn't even use adminRoomsPage
+```
+
+Investigated rather than assumed a fluke: ruled out a stale on-disk cache (Playwright persists a
+transform/dependency cache at `%TEMP%\playwright-transform-cache` on Windows — cleared it,
+same wrong result), ruled out cache-population-order (`--list` full run first, then the
+`--only-changed` check — same result), ruled out an mtime-based artifact (`touch`ed the visual
+spec to make it the most-recently-modified file — same result). Control cases worked correctly
+in the same session: `config/credentials.ts` (imported directly by `admin-rooms.spec.ts`)
+correctly selected it plus 3 other specs that also import it; `fixtures/pages.fixture.ts`
+correctly marked all 9 specs as affected. Only page-object files, one level beyond the shared
+fixture, were wrong — and consistently the _same_ wrong answer regardless of which page object
+was touched.
+
+Read the actual implementation (`packages/playwright/src/transform/compilationCache.ts`,
+bundled into `node_modules/.../playwright/lib/common/index.js`) to understand the mechanism:
+`fileDependencies` maps test file → its deps, `externalDependencies` maps an intermediate
+(non-test) file → its own deps, and `collectAffectedTestFiles` walks both maps to find specs
+transitively affected by a changed file. The logic looked structurally correct on read — the bug
+(or Windows-specific quirk) had to be empirical, not obvious from the source alone. Suspected a
+Windows path-separator mismatch in the `externalDependencies` set lookups, since this session had
+already hit one real Windows-vs-Linux path bug (the Docker `-v` mount mangling in Phase 11b).
+
+### Real-PR verification (required anyway — pull_request-triggered workflow changes can't be
+
+proven any other way, same as Phase 8) settled it
+
+Branched (`ci/test-impact-selective-execution`), committed the workflow change, then a second
+commit deliberately touching `pages/AdminRoomsPage.ts` again — specifically to re-run the exact
+failing case on a real Linux GH Actions runner. Opened PR #4, watched `gh pr checks --watch`.
+
+**Same wrong result on real Linux CI** — `--list`'s output (added as a permanent visibility step,
+not just a one-off diagnostic) showed the `affected (chromium)` job selecting only
+`tests/accessibility/pages.a11y.spec.ts`, identical to the Windows-local result. This
+disproves the Windows-path-mismatch theory outright — it's a genuine, cross-platform limitation
+of `--only-changed`'s dependency tracking for this project's fixture-based page-object
+architecture, not an environment quirk. Root cause still unconfirmed (one remaining suspect:
+the accessibility spec's `import * as AxeCorePlaywright from '@axe-core/playwright'` namespace
+import — the only namespace-style import among this project's spec files).
+
+Given this is a real, proven, twice-confirmed limitation — and page objects are the core unit of
+change in a Page-Object-Model framework, not an edge case — presented the finding directly
+rather than silently shipping something that could give false confidence. Asked how to scope it;
+chose to keep `affected` as a heavily-caveated, **non-blocking** advisory job (not added to
+required branch-protection checks), with the limitation documented prominently in the workflow
+file's own comments so it can't be missed by a future reader. `smoke` remains the only job every
+PR can actually be trusted against.
+
+Final commit on the PR branch reverted the verification-only comment in
+`pages/AdminRoomsPage.ts` (its purpose was done) and rewrote the `affected` job's header comment
+to state the proven-reliable and proven-unreliable cases explicitly. All 8 checks
+(lint/typecheck/3×smoke/3×affected) passed; squash-merged via `gh pr merge 4 --squash
+--delete-branch`.
+
+**Phase 11 complete.** All originally-scoped work across the 11-phase roadmap is now built. What
+remains is operational, not developmental: the deferred Phase 9/10 Terraform `apply` cycle, and
+whatever real-world lessons come from actually running the nightly regression once it's live.

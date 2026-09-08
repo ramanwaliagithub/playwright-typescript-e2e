@@ -66,14 +66,22 @@ jobs:
           path: playwright-report/
           retention-days: 7
 
-  # Test-impact-based selective execution: runs whatever spec files Playwright's own module-graph
-  # dependency tracking determines are actually affected by this PR's diff (not just a fixed
-  # subset) — a PR touching only docs/infra/CI-config triggers zero tests here (a clean pass via
-  # --pass-with-no-tests, not a failure), while one touching a page object, util, or config file
-  # picks up every spec that transitively depends on it. Deliberately not using
-  # --fail-on-flaky-tests here or in `smoke` — it would fight the retries:2 accommodation already
-  # in place for the shared hosted instance's transient slowness, turning expected retries into
-  # hard failures.
+  # Test-impact-based selective execution — NON-BLOCKING advisory job, not a required check.
+  # Runs whatever spec files Playwright's --only-changed determines are affected by this PR's
+  # diff. PROVEN RELIABLE for: a PR touching only docs/infra/CI-config (correctly selects zero
+  # tests, a clean pass via --pass-with-no-tests, not a failure); a spec file changed directly;
+  # a file a spec imports directly (e.g. config/credentials.ts); the shared fixture file itself
+  # (correctly marks every spec as affected). PROVEN UNRELIABLE for: page object files
+  # (pages/*.ts) — verified via a real PR (both locally on Windows and on this Linux runner) that
+  # editing a page object does NOT surface its real dependent specs, instead pointing at an
+  # unrelated one. Root cause not identified (suspected: Playwright's dependency collector and
+  # this project's `import * as X from '@axe-core/playwright'` namespace-import pattern in the
+  # accessibility spec, but unconfirmed). Since page objects are the core unit of change in this
+  # Page-Object-Model framework, do not treat this job's selection as complete for anything
+  # beyond docs/infra-only changes — `smoke` below is the only job every PR can actually be
+  # trusted against. Deliberately not using --fail-on-flaky-tests here or in `smoke` — it would
+  # fight the retries:2 accommodation already in place for the shared hosted instance's transient
+  # slowness, turning expected retries into hard failures.
   affected:
     runs-on: ubuntu-latest
     strategy:

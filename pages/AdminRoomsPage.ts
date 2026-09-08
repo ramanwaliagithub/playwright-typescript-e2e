@@ -2,9 +2,6 @@ import type { Locator } from '@playwright/test';
 import { BasePage } from './BasePage.js';
 import { SelfHealingLocator } from '../utils/SelfHealingLocator.js';
 
-// Verification-only comment: exercises the `affected` job's test-impact selection for a page
-// object change (not a spec file itself) — see PR verification notes.
-
 export type RoomType = 'Single' | 'Twin' | 'Double' | 'Family' | 'Suite';
 export type RoomFeature = 'WiFi' | 'TV' | 'Radio' | 'Refreshments' | 'Safe' | 'Views';
 

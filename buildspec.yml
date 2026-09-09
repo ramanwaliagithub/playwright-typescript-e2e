@@ -9,8 +9,12 @@ phases:
     runtime-versions:
       nodejs: 24
     commands:
+      # No explicit `corepack prepare pnpm@<version>` — corepack reads package.json's
+      # packageManager field and resolves the right version on its own at first use (confirmed:
+      # even with a stale explicit prepare pinning an old version, the pnpm install below still
+      # correctly downloaded and used whatever packageManager specified). Keeps this file from
+      # needing an edit every time pnpm gets bumped.
       - corepack enable
-      - corepack prepare pnpm@11.20.0 --activate
       - pnpm install --frozen-lockfile
       - pnpm exec playwright install --with-deps chromium firefox webkit
 

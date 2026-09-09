@@ -212,20 +212,18 @@ produces identical results to a local host run.
   `TF_VAR_rbp_admin_password`, and (for the GitHub source credential) `TF_VAR_github_token` at
   apply time — never committed.
 
-**Current status: the state backend mechanism was built, applied against real AWS, verified
-working, and then deliberately torn down** — proof-of-concept, not a standing resource, so
-there's no ongoing AWS cost from this phase yet. `infra/versions.tf`'s backend block currently
-has a placeholder bucket name. See `SETUP.md`'s Phase 9 section for the full apply → verify →
-destroy record, and `E2E_manual.md`'s Phase 9 "Redo guide" for the exact steps to stand it back
-up for real.
+**Current status: live.** All 18 resources are applied against real AWS (account
+`689971417924`, `ap-southeast-2`), state bucket `rbp-e2e-tfstate-db4f301e`. A manual CodeBuild
+run proved the pipeline works end-to-end (31/33 tests passed — see the Phase 9-10 phase log
+entry below for the 2 known, documented visual-baseline failures). The EventBridge nightly
+schedule remains **disabled**. Using the personal `terraform-cli` IAM user for now — the
+dedicated `rbp-e2e-terraform` user (least-privilege, provisioned via Terraform itself) remains a
+deferred follow-up, not yet done. See `SETUP.md`'s Phase 9/10 sections for the full
+apply/verify record.
 
 ```bash
-export AWS_PROFILE=<your-profile>   # or however your credentials are configured
-cd infra/bootstrap
-terraform init && terraform plan -out=bootstrap.tfplan   # review the plan
-terraform apply "bootstrap.tfplan"                       # needs explicit go-ahead — cost-incurring
-# copy state_bucket_name from the output into infra/versions.tf's backend block, then:
-cd .. && terraform init
+export AWS_PROFILE=terraform-cli   # or however your credentials are configured
+cd infra && terraform plan   # review — should show "No changes" if nothing's drifted
 ```
 
 `terraform apply`/`destroy` always need explicit go-ahead before running — every AWS resource
@@ -655,6 +653,28 @@ been proven to succeed against the real infrastructure.
 
 Failure notifications (Slack/Teams/email) were considered and explicitly deferred — buildspec
 ships without a notification step for now.
+
+**Applied for real (2026-09-09).** All 18 resources across Phase 9-10 are now live in AWS
+(account `689971417924`, `ap-southeast-2`), applied with the personal `terraform-cli` user (the
+dedicated `rbp-e2e-terraform` IAM user remains deferred). State bucket:
+`rbp-e2e-tfstate-db4f301e`. Verified directly via the AWS API (not just Terraform's own "apply
+complete" message) — the CodeBuild project, EventBridge rule (`state = DISABLED`, confirmed), 3
+SSM parameters, and the reports bucket all independently confirmed present.
+
+**A manual CodeBuild run proved the pipeline actually works end-to-end**: source pulled from
+GitHub via the PAT, pnpm + all 3 browsers installed, credentials decrypted correctly from SSM,
+the full 33-test suite ran against the real hosted RBP instance, and both the Playwright HTML
+report and a generated Allure report uploaded to S3. **31 of 33 tests passed** — the 2 failures
+were `visual regression › booking homepage renders consistently` on chromium and firefox
+(webkit passed), exactly the risk flagged in the Phase 11b section below: CodeBuild's
+`aws/codebuild/standard:7.0` image renders subtly differently than the
+`mcr.microsoft.com/playwright` Docker image the baselines were generated against. **Left as a
+known, documented gap for now** — the core infrastructure and pipeline are proven working;
+regenerating the 6 visual baselines against CodeBuild's actual image is a follow-up, not a
+blocker.
+
+The EventBridge schedule remains `DISABLED` — flipping it on for real nightly runs is a separate
+decision, not yet made.
 
 ### Phase 11a — Flake Quarantine & Self-Healing Locators
 

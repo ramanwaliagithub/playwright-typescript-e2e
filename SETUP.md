@@ -2144,3 +2144,143 @@ regression"`) — 9/9 eventually passed (one booking-flow test needed its usual 
 shared hosted instance, unrelated to pnpm). `package.json`'s `packageManager` field is now
 `pnpm@12.3.4`; `pnpm/action-setup@v4` in CI reads that field automatically (no version pinned in
 the workflow itself), so CI picks up the new version without any workflow change.
+
+## Phase 9-10 — Real Terraform Apply & CodeBuild Verification (2026-09-09)
+
+Closed out the last deferred item: everything built across Phase 9-10 (state backend, IAM,
+CodeBuild, S3, SSM, EventBridge) had been written and validated offline for weeks, but never
+actually applied to real AWS. This session did the real apply, end to end.
+
+### Decisions made before touching anything
+
+Two real choices, asked up front rather than assumed:
+
+1. **Dedicated `rbp-e2e-terraform` IAM user vs. keep using the personal `terraform-cli` user** —
+   chose to keep using `terraform-cli` for this apply, deferring the dedicated-user migration
+   further. Simpler for a first real apply; the staged migration remains a documented follow-up.
+2. **RBP admin credentials for the SSM parameters** — chose the app's own defaults
+   (`admin`/`password`, what `config/env.ts`'s zod schema already falls back to locally, since
+   no `.env` file exists on this machine) rather than something else. These are RBP's
+   publicly-documented demo credentials, not a real secret.
+
+### The GitHub PAT — a real secret, handled the same way AWS credentials always have been
+
+CodeBuild's `GITHUB` source type requires a linked credential even for a public repo (confirmed:
+`ramanwaliagithub/playwright-typescript-e2e` is public, AWS still requires it). A PAT is a real
+secret — "never paste secrets into chat" applies. Set up the same on-disk pattern already used
+for AWS credentials (`aws configure`, never typed into chat): added `infra/**/*.tfvars` to
+`.gitignore` (keeping `*.tfvars.example` un-ignored), wrote
+`infra/secrets.auto.tfvars.example` documenting the one variable needed
+(`github_token`, with a link to GitHub's fine-grained PAT creation page and the minimal
+"Contents: Read-only" scope needed), and asked the user to copy it to
+`infra/secrets.auto.tfvars` and fill in a real token themselves via their own editor. Verified
+the file existed and was no longer the placeholder text without ever reading or printing the
+actual token (`grep -q PLACEHOLDER_TEXT` returning false, plus a byte-count sanity check) —
+Terraform auto-loads `*.auto.tfvars`, so no `-var-file` flag or env var was needed once the file
+existed.
+
+### Bootstrap re-apply
+
+```bash
+cd infra/bootstrap
+AWS_PROFILE=terraform-cli terraform init
+AWS_PROFILE=terraform-cli terraform plan -out=bootstrap.tfplan
+# 6 to add — same shape as the original Phase 9 Day 1 proof
+AWS_PROFILE=terraform-cli terraform apply "bootstrap.tfplan"
+# Apply complete! Resources: 6 added, 0 changed, 0 destroyed.
+# state_bucket_name = "rbp-e2e-tfstate-db4f301e"
+```
+
+Wired the new bucket name into `infra/versions.tf`'s backend block (replacing the placeholder),
+`terraform init` on the main root against the real backend — same pre-existing, already-flagged
+`dynamodb_table` deprecation warning as before, kept as-is per the original spec.
+
+### Main root plan and apply
+
+```bash
+cd infra
+AWS_PROFILE=terraform-cli terraform plan -var="rbp_admin_username=admin" -var="rbp_admin_password=password" -out=main.tfplan
+# Plan: 18 to add, 0 to change, 0 to destroy.
+# github_token picked up automatically from secrets.auto.tfvars, shown as (sensitive value)
+# aws_cloudwatch_event_rule.nightly_regression: state = "DISABLED" — confirmed as designed
+AWS_PROFILE=terraform-cli terraform apply "main.tfplan"
+# Apply complete! Resources: 18 added, 0 changed, 0 destroyed.
+```
+
+**Verified directly via the AWS API afterward, not just Terraform's own "apply complete"
+message** — the project's established discipline for every prior apply in this build:
+
+```bash
+aws codebuild batch-get-projects --names rbp-e2e-regression   # source URL confirmed correct
+aws events describe-rule --name rbp-e2e-nightly-regression --query State   # "DISABLED"
+aws ssm get-parameters --names /rbp-e2e/ADMIN_USERNAME /rbp-e2e/BASE_URL /rbp-e2e/ADMIN_PASSWORD
+aws s3api head-bucket --bucket rbp-e2e-reports-689971417924   # exists
+```
+
+(Hit the familiar Git Bash path-mangling issue again on the SSM parameter names — `/rbp-e2e/...`
+looks like a Unix path to Git Bash. `MSYS_NO_PATHCONV=1` fixes it, same as the Phase 11b Docker
+mount issue — this is clearly a recurring category of gotcha on this machine, worth remembering
+for any future AWS CLI command with a leading-slash resource name.)
+
+### Manual CodeBuild run — the real proof
+
+```bash
+aws codebuild start-build --project-name rbp-e2e-regression
+# polled batch-get-builds every 15s until buildStatus != IN_PROGRESS
+```
+
+Took about 8 minutes (DOWNLOAD_SOURCE → INSTALL → BUILD → POST_BUILD → FAILED). Fetching the
+CloudWatch logs to see why hit a genuine, unrelated tooling snag first: `aws logs
+get-log-events` crashed with `'charmap' codec can't encode character '✓'` — the AWS CLI
+trying to print a Unicode checkmark (from pnpm's own colored output) to a Windows console using
+a legacy codepage. Neither `PYTHONIOENCODING=utf-8` nor `[Console]::OutputEncoding` in
+PowerShell fixed it; what worked was setting the actual active OS codepage before running the
+command:
+
+```powershell
+chcp 65001
+$env:PYTHONUTF8 = "1"
+aws logs get-log-events --log-group-name /codebuild/rbp-e2e --log-stream-name <id> --limit 10000 --output json > out.json
+```
+
+**Result: 31 of 33 tests passed.** The pipeline itself is fully proven — source pulled from
+GitHub via the PAT, `corepack enable` + `pnpm install --frozen-lockfile` succeeded (and
+correctly resolved pnpm 12.3.4 from `package.json`'s `packageManager` field despite buildspec's
+now-stale explicit `corepack prepare pnpm@11.20.0`, confirming corepack's own precedence rules —
+see the buildspec fix below), all 3 browsers installed, `ADMIN_USERNAME`/`ADMIN_PASSWORD`/
+`BASE_URL` decrypted correctly from SSM, the full 33-test suite ran against the real hosted
+instance, and both report types uploaded to S3 (`aws s3 cp ... --recursive`, confirmed by
+grepping the log for actual `upload:` lines, not just trusting the exit code).
+
+The 2 failures were both `visual regression › booking homepage renders consistently` (chromium
+and firefox; webkit and both admin-login variants passed) — `expect(page).toHaveScreenshot()`
+mismatches. **This is the exact risk flagged in Phase 11b's own notes**: CodeBuild's
+`aws/codebuild/standard:7.0` image renders subtly differently than the
+`mcr.microsoft.com/playwright:v1.62.1-noble` Docker image the baselines were generated against —
+predicted, not a surprise. Presented the finding and asked how to handle it; chose to leave it
+as a known, documented gap rather than regenerate the baselines against CodeBuild's actual image
+right now (Docker was already stopped locally; regenerating would mean starting it again for a
+non-blocking issue). The core infrastructure and pipeline are proven working — this is deferred
+polish, not a broken build.
+
+### Small fix found along the way
+
+`buildspec.yml` still had `corepack prepare pnpm@11.20.0 --activate` hardcoded from before last
+week's pnpm upgrade. Harmless in practice (corepack's own `packageManager`-field resolution
+overrode it anyway, confirmed in the build log: `pnpm install` downloaded 12.3.4 regardless of
+what was `prepare`d), but stale and would silently keep drifting on every future pnpm bump.
+Removed the explicit `prepare` line entirely — `corepack enable` alone is enough for corepack to
+resolve the right version from `package.json` at first actual use, so this file never needs
+touching again for a pnpm version change.
+
+### What's still deferred
+
+- Regenerating the 6 visual-regression baselines against CodeBuild's actual
+  `aws/codebuild/standard:7.0` image (known gap, not urgent).
+- The dedicated `rbp-e2e-terraform` IAM user migration (deferred again this session).
+- Flipping `schedule_enabled = true` to actually enable the nightly EventBridge trigger — a
+  separate decision from "the pipeline works," not yet made.
+- Failure notifications (Slack/Teams/email) — explicitly skipped back in Phase 10, unchanged.
+
+Committed as three commits (the gitignored tfvars pattern, the backend wiring, the buildspec
+pnpm fix), each pushed right after committing.

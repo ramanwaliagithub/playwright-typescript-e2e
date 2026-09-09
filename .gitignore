@@ -23,6 +23,8 @@ infra/**/*.tfstate
 infra/**/*.tfstate.*
 infra/**/crash.log
 infra/**/*.tfplan
+infra/**/*.tfvars
+!infra/**/*.tfvars.example
 # .terraform.lock.hcl is deliberately NOT ignored — like pnpm-lock.yaml, it pins exact
 # provider versions and should be committed for reproducible plans/applies.
 

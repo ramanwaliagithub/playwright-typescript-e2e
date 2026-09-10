@@ -2284,3 +2284,75 @@ touching again for a pnpm version change.
 
 Committed as three commits (the gitignored tfvars pattern, the backend wiring, the buildspec
 pnpm fix), each pushed right after committing.
+
+## Phase 10 Day 3 — EventBridge Trigger, Proven for Real (2026-09-10)
+
+The manual `start-build` run above proved the CodeBuild _project_ runs correctly — it didn't
+prove EventBridge's _scheduled trigger_ actually fires a build on its own. Those are genuinely
+different things: a project can work perfectly when started manually while the rule/target/IAM
+wiring that's supposed to trigger it automatically is subtly broken (wrong target ARN, missing
+`codebuild:StartBuild` permission on the EventBridge role, etc.) — none of that gets exercised
+by a manual start.
+
+The real cron (`cron(0 2 * * ? *)`, 2am UTC) could mean waiting up to ~24h to observe it fire
+naturally. Instead: asked how to verify it faster, agreed on a temporary near-term test rather
+than either (a) waiting up to a day, or (b) just flipping the real schedule on and hoping —
+proves the mechanism without committing to an indefinite nightly cost.
+
+```bash
+cd infra
+# current time was 2026-09-10 03:28 UTC; targeted 03:36 (≈7 min out — buffer for apply +
+# EventBridge's own scheduling latency)
+AWS_PROFILE=terraform-cli terraform plan \
+  -var="rbp_admin_username=admin" -var="rbp_admin_password=password" \
+  -var="schedule_enabled=true" \
+  -var="schedule_expression=cron(36 3 10 9 ? 2026)" \
+  -out=test-schedule.tfplan
+# Plan: 0 to add, 1 to change, 0 to destroy — only the EventBridge rule, exactly as expected
+AWS_PROFILE=terraform-cli terraform apply "test-schedule.tfplan"
+aws events describe-rule --name rbp-e2e-nightly-regression --query "{State:State,Schedule:ScheduleExpression}"
+# {"State": "ENABLED", "Schedule": "cron(36 3 10 9 ? 2026)"} — confirmed via API, not just Terraform's own message
+```
+
+Waited past the target time, then checked for a new build:
+
+```bash
+aws codebuild list-builds-for-project --project-name rbp-e2e-regression --sort-order DESCENDING --query "ids[0:3]"
+# a new build ID appeared beyond the manual one from before
+aws codebuild batch-get-builds --ids <new-build-id> --query "builds[0].{initiator:initiator,startTime:startTime,status:buildStatus}"
+# {"initiator": "rule/rbp-e2e-nightly-regression", ...}
+```
+
+**`initiator: "rule/rbp-e2e-nightly-regression"` is the actual proof** — CodeBuild records who
+or what started a build, and a manual `start-build` call would show the IAM principal instead.
+This is definitive: EventBridge → IAM role → CodeBuild StartBuild all wired correctly.
+
+Reverted immediately (no `-var` overrides this time, so Terraform fell back to the file's real
+defaults):
+
+```bash
+AWS_PROFILE=terraform-cli terraform plan -var="rbp_admin_username=admin" -var="rbp_admin_password=password" -out=revert-schedule.tfplan
+# schedule_expression: cron(36 3 10 9 ? 2026) -> cron(0 2 * * ? *); state: ENABLED -> DISABLED
+AWS_PROFILE=terraform-cli terraform apply "revert-schedule.tfplan"
+aws events describe-rule --name rbp-e2e-nightly-regression --query "{State:State,Schedule:ScheduleExpression}"
+# {"State": "DISABLED", "Schedule": "cron(0 2 * * ? *)"} — confirmed reverted
+```
+
+The test build itself finished `FAILED` — same known category as the earlier manual run (the
+visual-baseline image mismatch), except this time **webkit also failed** where it had passed
+before (30/33 passed vs. 31/33 last time), all three now failing on the same
+`booking homepage renders consistently` visual test. Not a new issue — same documented root
+cause (CodeBuild's `standard:7.0` image vs. the Docker image baselines were generated against),
+just enough render variance between runs to occasionally push webkit over its tolerance too.
+Confirms the mismatch is a real environment difference, not a one-off fluke.
+
+No file changes from this — everything was done via `-var` overrides, never touching
+`infra/eventbridge.tf`'s committed defaults, so nothing to commit for the mechanism itself
+(`git status` confirmed clean). Cleaned up local `.tfplan` files afterward (gitignored, but no
+reason to leave stale ones lying around).
+
+**This closes out Phase 10 Day 3's actual stated requirement** — "confirm the
+EventBridge-triggered scheduled run fires correctly." Failure notifications (Day 3's other
+piece) remain explicitly skipped, a resolved decision from Phase 10, not a gap. Leaving the
+schedule permanently enabled is a separate, still-unmade decision — the mechanism is proven,
+whether to actually run it every night is a cost/ops call for later.

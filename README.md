@@ -676,6 +676,19 @@ blocker.
 The EventBridge schedule remains `DISABLED` — flipping it on for real nightly runs is a separate
 decision, not yet made.
 
+**Phase 10 Day 3 — EventBridge trigger proven for real (2026-09-10).** The manual run above
+proved the CodeBuild _project_ works; it didn't prove the _scheduled trigger_ actually fires one.
+Temporarily pointed `schedule_expression` at a few minutes in the future and set
+`schedule_enabled = true` via `-var` overrides (not a permanent file change), applied, waited,
+then confirmed via `aws codebuild batch-get-builds` that a new build's `initiator` field read
+`rule/rbp-e2e-nightly-regression` — proof EventBridge triggered it, not a manual `start-build`
+call. Reverted immediately after (`schedule_enabled = false`, `schedule_expression` back to the
+real `cron(0 2 * * ? *)`), confirmed via the AWS API. That test run failed the same way as
+before (same category — the visual-baseline image mismatch, this time also catching webkit, 30
+of 33 passed) — consistent with the known, already-documented gap, not a new issue. This closes
+out Phase 10 Day 3's actual requirement ("confirm the EventBridge-triggered scheduled run fires
+correctly"); leaving the schedule permanently enabled remains a separate, still-unmade decision.
+
 ### Phase 11a — Flake Quarantine & Self-Healing Locators
 
 **Self-healing locators:** [`utils/SelfHealingLocator.ts`](./utils/SelfHealingLocator.ts) wraps

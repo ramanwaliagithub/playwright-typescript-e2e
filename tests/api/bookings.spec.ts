@@ -19,7 +19,8 @@ test('a created booking is retrievable by id and by room, then deletable', async
     const roomBookings = await apiClient.listBookingsForRoom(1);
     expect(roomBookings.map((b) => b.bookingid)).toContain(created.bookingid);
   } 
-    finally {
+    finally 
+    {
     await apiClient.deleteBooking(created.bookingid);
   }
 });
